@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -41,6 +42,26 @@ func TestNewForgeForRefusesMissingInputs(t *testing.T) {
 	}
 	if _, err := newForgeFor(mustHost(t), nil); !errors.Is(err, errNoCredentials) {
 		t.Errorf("nil credentials: err = %v, want errNoCredentials", err)
+	}
+}
+
+func TestPluginClientBoundsEachPhaseWithoutWholeRequestTimeout(t *testing.T) {
+	client := newPluginClient()
+	if client.Timeout != 0 {
+		t.Errorf("Client.Timeout = %v, want none so job logs can stream", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("TLSHandshakeTimeout = %v, want 10s", transport.TLSHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout != 30*time.Second {
+		t.Errorf("ResponseHeaderTimeout = %v, want 30s", transport.ResponseHeaderTimeout)
+	}
+	if transport.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 90s", transport.IdleConnTimeout)
 	}
 }
 
