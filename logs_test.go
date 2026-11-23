@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -95,6 +96,29 @@ func TestTailBufferKeepsLastBytesAcrossChunks(t *testing.T) {
 	}
 	if string(tail) != "bab" {
 		t.Errorf("tail = %q, want %q", tail, "bab")
+	}
+}
+
+func TestTailBufferKeepsLastBytesWhenChunksArriveOneByteAtATime(t *testing.T) {
+	tail, err := readTail(iotest.OneByteReader(strings.NewReader("abcdefghij")), 3, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tail) != "hij" {
+		t.Errorf("tail = %q, want %q", tail, "hij")
+	}
+}
+
+func TestTailBufferStaysBoundedWhileWriting(t *testing.T) {
+	const keep = 3
+	buffer := &tailBuffer{keep: keep}
+	for range 100 {
+		if _, err := buffer.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		if len(buffer.data) > 2*keep {
+			t.Fatalf("buffer holds %d bytes after writes, want at most %d", len(buffer.data), 2*keep)
+		}
 	}
 }
 
