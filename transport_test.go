@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -241,5 +242,92 @@ func TestTooManyRedirectsStopsTheChain(t *testing.T) {
 	_, err = f.JobLog(t.Context(), mustJobRef(t), 16)
 	if !errors.Is(err, errTooManyRedirects) {
 		t.Fatalf("err = %v, want errTooManyRedirects", err)
+	}
+}
+
+func jobLogForge(t *testing.T, server *httptest.Server) *forge {
+	t.Helper()
+	api, err := parseEndpoints(server.URL, server.URL+"/graphql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newForge(mustHost(t), &fakeCreds{token: mustToken(t)}, api, server.Client(), fixedClock)
+}
+
+func TestRedirectToSiblingPortDropsAuthorization(t *testing.T) {
+	seenBySibling := make(chan string, 1)
+	sibling := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBySibling <- r.Header.Get(headerAuthorization)
+		writeBody(t, w, "0123456789abcdef")
+	}))
+	t.Cleanup(sibling.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sibling.URL+"/blob/logs", http.StatusFound)
+	}))
+	t.Cleanup(api.Close)
+
+	if _, err := jobLogForge(t, api).JobLog(t.Context(), mustJobRef(t), 4); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-seenBySibling; got != "" {
+		t.Errorf("sibling port received Authorization %q after the redirect", got)
+	}
+}
+
+func TestRedirectFromHTTPSToHTTPDropsAuthorization(t *testing.T) {
+	seenByPlain := make(chan string, 1)
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenByPlain <- r.Header.Get(headerAuthorization)
+		writeBody(t, w, "0123456789abcdef")
+	}))
+	t.Cleanup(plain.Close)
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+"/blob/logs", http.StatusFound)
+	}))
+	t.Cleanup(secure.Close)
+
+	tail, err := jobLogForge(t, secure).JobLog(t.Context(), mustJobRef(t), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tail) != "cdef" {
+		t.Errorf("tail = %q, want %q", tail, "cdef")
+	}
+	if got := <-seenByPlain; got != "" {
+		t.Errorf("plain HTTP host received Authorization %q after an HTTPS redirect", got)
+	}
+}
+
+func TestDropAuthorizationOnSchemeChangeWithSameHostAndPort(t *testing.T) {
+	origin, err := url.Parse("https://api.example.test/graphql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downgraded, err := url.Parse("http://api.example.test/graphql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &http.Request{URL: downgraded, Header: http.Header{}}
+	req.Header.Set(headerAuthorization, "Bearer "+testSecret)
+	if err := dropAuthorizationAcrossOrigins(req, []*http.Request{{URL: origin}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get(headerAuthorization); got != "" {
+		t.Errorf("Authorization after an https to http redirect = %q, want none", got)
+	}
+}
+
+func TestSameOriginRedirectKeepsAuthorization(t *testing.T) {
+	origin, err := url.Parse("https://api.example.test/graphql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &http.Request{URL: origin, Header: http.Header{}}
+	req.Header.Set(headerAuthorization, "Bearer "+testSecret)
+	if err := dropAuthorizationAcrossOrigins(req, []*http.Request{{URL: origin}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get(headerAuthorization); got != "Bearer "+testSecret {
+		t.Errorf("Authorization on the same origin = %q, want it kept", got)
 	}
 }
