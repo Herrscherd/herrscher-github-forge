@@ -1,0 +1,166 @@
+package github
+
+import (
+	"errors"
+	"net/http"
+	"sync/atomic"
+	"testing"
+
+	contracts "github.com/Herrscherd/herrscher-contracts"
+)
+
+func issuePayload(number int, state string) map[string]any {
+	return map[string]any{
+		"number":             number,
+		"title":              "Bug",
+		"body":               "it breaks",
+		"html_url":           "https://github.com/acme/widgets/issues/3",
+		"state":              state,
+		"author_association": "CONTRIBUTOR",
+		"user":               map[string]any{"login": "octocat", "id": 1, "type": "User"},
+		"labels":             []map[string]string{{"name": "bug"}, {"name": "ui"}},
+	}
+}
+
+func TestIssueMapsFields(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues/3", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, issuePayload(3, "open"))
+	})
+	f, _ := newTestForge(t, mux)
+	got, err := f.Issue(t.Context(), mustIssueRef(t, testRepo(t), 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Ref.Number() != 3 || got.Title != "Bug" || got.Body != "it breaks" || got.URL == "" {
+		t.Errorf("issue = %+v", got)
+	}
+	if got.State != contracts.IssueOpen || len(got.Labels) != 2 || got.Labels[1] != "ui" {
+		t.Errorf("state or labels = %v %q", got.State, got.Labels)
+	}
+	if got.Author.Login != "octocat" || got.Author.Association != contracts.AssociationContributor {
+		t.Errorf("author = %+v", got.Author)
+	}
+}
+
+func TestIssueUnknownStateIsAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues/3", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, issuePayload(3, "archived"))
+	})
+	f, _ := newTestForge(t, mux)
+	if _, err := f.Issue(t.Context(), mustIssueRef(t, testRepo(t), 3)); !errors.Is(err, errUnknownIssueState) {
+		t.Fatalf("err = %v, want errUnknownIssueState", err)
+	}
+}
+
+func TestIssueNotFound(t *testing.T) {
+	f, _ := newTestForge(t, http.NewServeMux())
+	if _, err := f.Issue(t.Context(), mustIssueRef(t, testRepo(t), 3)); !errors.Is(err, contracts.ErrForgeNotFound) {
+		t.Fatalf("err = %v, want ErrForgeNotFound", err)
+	}
+}
+
+func TestIssuesFiltersPullRequestsAndFollowsLink(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("state") != "closed" || q.Get("labels") != "bug,ui" || q.Get("per_page") != "30" || q.Get("page") != "1" {
+			t.Errorf("query = %v", q)
+		}
+		pr := issuePayload(4, "open")
+		pr["pull_request"] = map[string]string{"url": "x"}
+		w.Header().Set("Link", `<https://api.github.com/repos/acme/widgets/issues?page=2>; rel="next", <https://api.github.com/repos/acme/widgets/issues?page=9>; rel="last"`)
+		writeJSON(t, w, http.StatusOK, []any{issuePayload(3, "closed"), pr})
+	})
+	f, _ := newTestForge(t, mux)
+	query := contracts.IssueQuery{Labels: []string{"bug", "ui"}, State: contracts.IssueClosed}
+	page, err := f.Issues(t.Context(), testRepo(t), query, contracts.PageRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].Ref.Number() != 3 || page.Items[0].State != contracts.IssueClosed {
+		t.Errorf("items = %+v, want only issue 3", page.Items)
+	}
+	if page.Next != "2" {
+		t.Errorf("next = %q, want 2", page.Next)
+	}
+}
+
+func TestIssuesDefaultsToOpenAndSendsPageCursor(t *testing.T) {
+	var calls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		q := r.URL.Query()
+		if q.Get("state") != "open" || q.Get("page") != "3" || q.Get("per_page") != "10" {
+			t.Errorf("query = %v", q)
+		}
+		writeJSON(t, w, http.StatusOK, []any{})
+	})
+	f, _ := newTestForge(t, mux)
+	page, err := f.Issues(t.Context(), testRepo(t), contracts.IssueQuery{}, contracts.PageRequest{Cursor: "3", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 0 || page.Next != "" {
+		t.Errorf("last page = %+v", page)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("calls = %d", calls.Load())
+	}
+}
+
+func TestIssuesRefusesInvalidInputsWithoutSending(t *testing.T) {
+	var calls atomic.Int32
+	f, _ := newTestForge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	repo := testRepo(t)
+	if _, err := f.Issues(t.Context(), repo, contracts.IssueQuery{}, contracts.PageRequest{Cursor: "next-please"}); !errors.Is(err, errInvalidCursor) {
+		t.Errorf("bad cursor: err = %v, want errInvalidCursor", err)
+	}
+	if _, err := f.Issues(t.Context(), repo, contracts.IssueQuery{}, contracts.PageRequest{Limit: 101}); !errors.Is(err, contracts.ErrInvalidPageLimit) {
+		t.Errorf("limit 101: err = %v, want ErrInvalidPageLimit", err)
+	}
+	if _, err := f.Issues(t.Context(), repo, contracts.IssueQuery{State: contracts.IssueState(99)}, contracts.PageRequest{}); !errors.Is(err, errUnknownIssueState) {
+		t.Errorf("unknown state: err = %v, want errUnknownIssueState", err)
+	}
+	if calls.Load() != 0 {
+		t.Error("a refused listing reached the server")
+	}
+}
+
+func TestNextPageCursorReadsLinkRelation(t *testing.T) {
+	tests := []struct {
+		name string
+		link string
+		want contracts.PageCursor
+	}{
+		{name: "empty header", link: "", want: ""},
+		{name: "next present", link: `<https://api.github.com/x?page=4>; rel="next"`, want: "4"},
+		{name: "only last", link: `<https://api.github.com/x?page=9>; rel="last"`, want: ""},
+		{name: "next among others", link: `<https://api.github.com/x?page=1>; rel="prev", <https://api.github.com/x?page=6>; rel="next"`, want: "6"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := nextPageCursor(test.link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Errorf("cursor = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPageNumberAndLimit(t *testing.T) {
+	if n, err := pageNumber(""); err != nil || n != 1 {
+		t.Errorf("empty cursor = %d, %v; want 1", n, err)
+	}
+	if _, err := pageNumber("0"); !errors.Is(err, errInvalidCursor) {
+		t.Errorf("cursor 0: err = %v, want errInvalidCursor", err)
+	}
+	if n, err := pageLimit(contracts.PageRequest{}); err != nil || n != defaultPageSize {
+		t.Errorf("default limit = %d, %v", n, err)
+	}
+}
