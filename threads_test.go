@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
@@ -13,18 +14,38 @@ import (
 const threadsJSON = `{"repository":{"pullRequest":{"reviewThreads":{
   "pageInfo":{"hasNextPage":true,"endCursor":"t2"},
   "nodes":[
-    {"id":"T1","isResolved":false,"path":"main.go","line":12,
-     "comments":{"nodes":[
-       {"databaseId":1,"body":"fix this","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER",
+    {"id":"T1","isResolved":false,"path":"main.go","line":12,"originalLine":3,
+     "comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+       {"fullDatabaseId":"1","body":"fix this","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER",
         "author":{"__typename":"User","login":"reviewer","databaseId":42}},
-       {"databaseId":2,"body":"done","createdAt":"2026-11-22T11:00:00Z","authorAssociation":"NONE",
+       {"fullDatabaseId":"2","body":"done","createdAt":"2026-11-22T11:00:00Z","authorAssociation":"NONE",
         "author":{"__typename":"Bot","login":"ci-bot","databaseId":7}}
      ]}},
-    {"id":"T2","isResolved":true,"path":"README.md","line":0,
-     "comments":{"nodes":[
-       {"databaseId":3,"body":"ghost","createdAt":"2026-11-22T12:00:00Z","authorAssociation":"FIRST_TIME_CONTRIBUTOR","author":null}
+    {"id":"T2","isResolved":true,"path":"README.md","line":null,"originalLine":7,
+     "comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+       {"fullDatabaseId":"3","body":"ghost","createdAt":"2026-11-22T12:00:00Z","authorAssociation":"FIRST_TIME_CONTRIBUTOR","author":null}
      ]}}
   ]}}}}`
+
+const threadWithTwoCommentPagesJSON = `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+  {"id":"T1","isResolved":false,"path":"main.go","line":12,"originalLine":12,
+   "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"c2"},"nodes":[
+     {"fullDatabaseId":"1","body":"first","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER","author":{"__typename":"User","login":"reviewer","databaseId":42}}
+   ]}}
+]}}}}`
+
+const laterCommentPageJSON = `{"node":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+  {"fullDatabaseId":"2","body":"second","createdAt":"2026-11-22T11:00:00Z","authorAssociation":"MEMBER","author":{"__typename":"User","login":"reviewer","databaseId":42}}
+]}}}`
+
+const endlessCommentPageJSON = `{"node":{"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"more"},"nodes":[]}}}`
+
+const threadWithBadCommentIDJSON = `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+  {"id":"T1","isResolved":false,"path":"main.go","line":1,"originalLine":null,
+   "comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+     {"fullDatabaseId":"not-a-number","body":"x","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"NONE","author":null}
+   ]}}
+]}}}}`
 
 func TestReviewThreadsMapsCommentsAndAuthors(t *testing.T) {
 	var seen sentGraphQL
@@ -58,8 +79,83 @@ func TestReviewThreadsMapsCommentsAndAuthors(t *testing.T) {
 		t.Errorf("bot author = %+v, want Bot", bot)
 	}
 	if seen.Variables["after"] != "t1" || seen.Variables["number"] != float64(5) {
-		assertGhostAuthor(t, page.Items[1])
 		t.Errorf("variables = %v", seen.Variables)
+	}
+	assertGhostAuthor(t, page.Items[1])
+}
+
+func TestReviewThreadLineFallsBackToOriginalLine(t *testing.T) {
+	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(threadsJSON)))
+	page, err := f.ReviewThreads(t.Context(), mustPullRef(t, testRepo(t)), contracts.PageRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Items[0].Line != 12 {
+		t.Errorf("line with both fields set = %d, want 12", page.Items[0].Line)
+	}
+	if page.Items[1].Line != 7 {
+		t.Errorf("line from originalLine = %d, want 7", page.Items[1].Line)
+	}
+}
+
+func TestReviewThreadsReadsEveryCommentPage(t *testing.T) {
+	var sent []sentGraphQL
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request sentGraphQL
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		sent = append(sent, request)
+		if _, followUp := request.Variables["threadId"]; followUp {
+			graphQLData(t, w, json.RawMessage(laterCommentPageJSON))
+			return
+		}
+		graphQLData(t, w, json.RawMessage(threadWithTwoCommentPagesJSON))
+	})
+	f, _ := newTestForge(t, handler)
+	page, err := f.ReviewThreads(t.Context(), mustPullRef(t, testRepo(t)), contracts.PageRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := page.Items[0].Comments
+	if len(comments) != 2 || comments[0].Body != "first" || comments[1].Body != "second" {
+		t.Fatalf("comments = %+v, want both pages in order", comments)
+	}
+	if len(sent) != 2 || sent[1].Variables["threadId"] != "T1" || sent[1].Variables["after"] != "c2" {
+		t.Errorf("requests = %+v, want one follow-up for thread T1 after c2", sent)
+	}
+}
+
+func TestReviewThreadsRefusesThreadPastCommentPageLimit(t *testing.T) {
+	var followUps atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request sentGraphQL
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, followUp := request.Variables["threadId"]; !followUp {
+			graphQLData(t, w, json.RawMessage(threadWithTwoCommentPagesJSON))
+			return
+		}
+		followUps.Add(1)
+		graphQLData(t, w, json.RawMessage(endlessCommentPageJSON))
+	})
+	f, _ := newTestForge(t, handler)
+	_, err := f.ReviewThreads(t.Context(), mustPullRef(t, testRepo(t)), contracts.PageRequest{})
+	if !errors.Is(err, errTooManyCommentPages) {
+		t.Fatalf("err = %v, want errTooManyCommentPages", err)
+	}
+	if got := followUps.Load(); got != maxCommentPages-1 {
+		t.Errorf("follow-up requests = %d, want %d", got, maxCommentPages-1)
+	}
+}
+
+func TestReviewThreadsRefusesCommentIDThatIsNotAnInteger(t *testing.T) {
+	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(threadWithBadCommentIDJSON)))
+	if _, err := f.ReviewThreads(t.Context(), mustPullRef(t, testRepo(t)), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
+		t.Fatalf("err = %v, want errUnexpectedValue", err)
 	}
 }
 
