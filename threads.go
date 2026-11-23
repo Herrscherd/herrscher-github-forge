@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
 	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
@@ -24,7 +23,7 @@ const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!
           comments(first: 100) {
             pageInfo { hasNextPage endCursor }
             nodes {
-              fullDatabaseId body createdAt authorAssociation
+              body createdAt authorAssociation
               author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
             }
           }
@@ -40,7 +39,7 @@ const threadCommentsQuery = `query($threadId: ID!, $after: String) {
       comments(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          fullDatabaseId body createdAt authorAssociation
+          body createdAt authorAssociation
           author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
         }
       }
@@ -84,7 +83,6 @@ type threadCommentsResponse struct {
 }
 
 type commentNodeWire struct {
-	FullDatabaseID    string    `json:"fullDatabaseId"`
 	Body              string    `json:"body"`
 	CreatedAt         time.Time `json:"createdAt"`
 	AuthorAssociation string    `json:"authorAssociation"`
@@ -95,10 +93,7 @@ type commentNodeWire struct {
 	} `json:"author"`
 }
 
-func (c commentNodeWire) toComment() (contracts.ReviewComment, error) {
-	if _, err := strconv.ParseInt(c.FullDatabaseID, 10, 64); err != nil {
-		return contracts.ReviewComment{}, fmt.Errorf("review comment id %q: %w", c.FullDatabaseID, errUnexpectedValue)
-	}
+func (c commentNodeWire) toComment() contracts.ReviewComment {
 	var author actorWire
 	typename := ""
 	if c.Author != nil {
@@ -110,7 +105,7 @@ func (c commentNodeWire) toComment() (contracts.ReviewComment, error) {
 		Author:    author.forgeActor(c.AuthorAssociation),
 		Body:      c.Body,
 		CreatedAt: c.CreatedAt,
-	}, nil
+	}
 }
 
 func (n threadNodeWire) line() int {
@@ -123,55 +118,47 @@ func (n threadNodeWire) line() int {
 	return 0
 }
 
-func toComments(nodes []commentNodeWire) ([]contracts.ReviewComment, error) {
+func toComments(nodes []commentNodeWire) []contracts.ReviewComment {
 	comments := make([]contracts.ReviewComment, 0, len(nodes))
 	for _, node := range nodes {
-		comment, err := node.toComment()
-		if err != nil {
-			return nil, err
-		}
-		comments = append(comments, comment)
+		comments = append(comments, node.toComment())
 	}
-	return comments, nil
+	return comments
 }
 
-func (f *forge) allComments(ctx context.Context, threadID string, first threadCommentsWire) ([]commentNodeWire, error) {
+func (f *forge) allComments(ctx context.Context, threadID string, first threadCommentsWire) ([]commentNodeWire, bool, error) {
 	nodes := slices.Clone(first.Nodes)
 	page := first.PageInfo
 	for pages := 1; page.HasNextPage; pages++ {
 		if pages >= maxCommentPages {
-			return nil, fmt.Errorf("thread %s: %w", threadID, errTooManyCommentPages)
+			return nil, false, fmt.Errorf("thread %s: %w", threadID, errTooManyCommentPages)
 		}
 		var response threadCommentsResponse
 		variables := map[string]any{"threadId": threadID, afterVariable: page.EndCursor}
 		if err := f.graphQL(ctx, threadCommentsQuery, variables, &response); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if response.Node == nil {
-			return nil, fmt.Errorf("thread %s: %w", threadID, contracts.ErrForgeNotFound)
+			return nil, false, nil
 		}
 		nodes = append(nodes, response.Node.Comments.Nodes...)
 		page = response.Node.Comments.PageInfo
 	}
-	return nodes, nil
+	return nodes, true, nil
 }
 
-func (f *forge) threadOf(ctx context.Context, node threadNodeWire) (contracts.ReviewThread, error) {
-	nodes, err := f.allComments(ctx, node.ID, node.Comments)
-	if err != nil {
-		return contracts.ReviewThread{}, err
-	}
-	comments, err := toComments(nodes)
-	if err != nil {
-		return contracts.ReviewThread{}, err
+func (f *forge) threadOf(ctx context.Context, node threadNodeWire) (contracts.ReviewThread, bool, error) {
+	nodes, found, err := f.allComments(ctx, node.ID, node.Comments)
+	if err != nil || !found {
+		return contracts.ReviewThread{}, false, err
 	}
 	return contracts.ReviewThread{
 		ID:       node.ID,
 		Path:     node.Path,
 		Line:     node.line(),
 		Resolved: node.IsResolved,
-		Comments: comments,
-	}, nil
+		Comments: toComments(nodes),
+	}, true, nil
 }
 
 func (f *forge) ReviewThreads(ctx context.Context, ref contracts.PullRequestRef, page contracts.PageRequest) (contracts.Page[contracts.ReviewThread], error) {
@@ -199,11 +186,13 @@ func (f *forge) ReviewThreads(ctx context.Context, ref contracts.PullRequestRef,
 	listing := response.Repository.PullRequest.ReviewThreads
 	items := make([]contracts.ReviewThread, 0, len(listing.Nodes))
 	for _, node := range listing.Nodes {
-		thread, err := f.threadOf(ctx, node)
+		thread, found, err := f.threadOf(ctx, node)
 		if err != nil {
 			return contracts.Page[contracts.ReviewThread]{}, err
 		}
-		items = append(items, thread)
+		if found {
+			items = append(items, thread)
+		}
 	}
 	return contracts.Page[contracts.ReviewThread]{Items: items, Next: listing.PageInfo.cursor()}, nil
 }

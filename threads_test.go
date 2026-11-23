@@ -16,34 +16,38 @@ const threadsJSON = `{"repository":{"pullRequest":{"reviewThreads":{
   "nodes":[
     {"id":"T1","isResolved":false,"path":"main.go","line":12,"originalLine":3,
      "comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
-       {"fullDatabaseId":"1","body":"fix this","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER",
+       {"body":"fix this","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER",
         "author":{"__typename":"User","login":"reviewer","databaseId":42}},
-       {"fullDatabaseId":"2","body":"done","createdAt":"2026-11-22T11:00:00Z","authorAssociation":"NONE",
+       {"body":"done","createdAt":"2026-11-22T11:00:00Z","authorAssociation":"NONE",
         "author":{"__typename":"Bot","login":"ci-bot","databaseId":7}}
      ]}},
     {"id":"T2","isResolved":true,"path":"README.md","line":null,"originalLine":7,
      "comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
-       {"fullDatabaseId":"3","body":"ghost","createdAt":"2026-11-22T12:00:00Z","authorAssociation":"FIRST_TIME_CONTRIBUTOR","author":null}
+       {"body":"ghost","createdAt":"2026-11-22T12:00:00Z","authorAssociation":"FIRST_TIME_CONTRIBUTOR","author":null}
      ]}}
   ]}}}}`
 
 const threadWithTwoCommentPagesJSON = `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
   {"id":"T1","isResolved":false,"path":"main.go","line":12,"originalLine":12,
    "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"c2"},"nodes":[
-     {"fullDatabaseId":"1","body":"first","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER","author":{"__typename":"User","login":"reviewer","databaseId":42}}
+     {"body":"first","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER","author":{"__typename":"User","login":"reviewer","databaseId":42}}
    ]}}
 ]}}}}`
 
 const laterCommentPageJSON = `{"node":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
-  {"fullDatabaseId":"2","body":"second","createdAt":"2026-11-22T11:00:00Z","authorAssociation":"MEMBER","author":{"__typename":"User","login":"reviewer","databaseId":42}}
+  {"body":"second","createdAt":"2026-11-22T11:00:00Z","authorAssociation":"MEMBER","author":{"__typename":"User","login":"reviewer","databaseId":42}}
 ]}}}`
 
 const endlessCommentPageJSON = `{"node":{"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"more"},"nodes":[]}}}`
 
-const threadWithBadCommentIDJSON = `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
-  {"id":"T1","isResolved":false,"path":"main.go","line":1,"originalLine":null,
+const threadDeletedMidwayJSON = `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+  {"id":"T1","isResolved":false,"path":"main.go","line":12,"originalLine":12,
+   "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"c2"},"nodes":[
+     {"body":"first","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"MEMBER","author":{"__typename":"User","login":"reviewer","databaseId":42}}
+   ]}},
+  {"id":"T2","isResolved":true,"path":"README.md","line":7,"originalLine":7,
    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
-     {"fullDatabaseId":"not-a-number","body":"x","createdAt":"2026-11-22T10:00:00Z","authorAssociation":"NONE","author":null}
+     {"body":"kept","createdAt":"2026-11-22T12:00:00Z","authorAssociation":"NONE","author":null}
    ]}}
 ]}}}}`
 
@@ -152,10 +156,31 @@ func TestReviewThreadsRefusesThreadPastCommentPageLimit(t *testing.T) {
 	}
 }
 
-func TestReviewThreadsRefusesCommentIDThatIsNotAnInteger(t *testing.T) {
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(threadWithBadCommentIDJSON)))
-	if _, err := f.ReviewThreads(t.Context(), mustPullRef(t, testRepo(t)), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
-		t.Fatalf("err = %v, want errUnexpectedValue", err)
+func TestReviewThreadsSkipsThreadDeletedBetweenPages(t *testing.T) {
+	var followUps atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request sentGraphQL
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, followUp := request.Variables["threadId"]; followUp {
+			followUps.Add(1)
+			graphQLData(t, w, json.RawMessage(`{"node":null}`))
+			return
+		}
+		graphQLData(t, w, json.RawMessage(threadDeletedMidwayJSON))
+	})
+	f, _ := newTestForge(t, handler)
+	page, err := f.ReviewThreads(t.Context(), mustPullRef(t, testRepo(t)), contracts.PageRequest{})
+	if err != nil {
+		t.Fatalf("err = %v, want the listing to survive a thread deleted midway", err)
+	}
+	if got := followUps.Load(); got != 1 {
+		t.Errorf("follow-up requests = %d, want 1 for the deleted thread", got)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != "T2" {
+		t.Fatalf("items = %+v, want only thread T2", page.Items)
 	}
 }
 
