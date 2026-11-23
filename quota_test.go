@@ -92,6 +92,27 @@ func TestThrottleResetFromRetryAfter(t *testing.T) {
 	}
 }
 
+func TestThrottleResetFromRetryAfterHTTPDate(t *testing.T) {
+	after := testNow().Add(90 * time.Second).Truncate(time.Second)
+	header := http.Header{}
+	header.Set(headerRetryAfter, after.UTC().Format(http.TimeFormat))
+	reset, limited := throttleReset(header, testNow())
+	if !limited || !reset.Equal(after) {
+		t.Errorf("throttleReset = %v, %v; want reset at %v and limited", reset, limited, after)
+	}
+}
+
+func TestReadRateLimitAbsentRemainingIsUnknown(t *testing.T) {
+	if got := readRateLimit(http.Header{}).Remaining; got != unknownRemaining {
+		t.Errorf("Remaining without the header = %d, want %d", got, unknownRemaining)
+	}
+	header := http.Header{}
+	header.Set(headerRateRemaining, "7")
+	if got := readRateLimit(header).Remaining; got != 7 {
+		t.Errorf("Remaining with the header = %d, want 7", got)
+	}
+}
+
 func TestParseCount(t *testing.T) {
 	tests := map[string]bool{"0": true, "42": true, "": false, "-1": false, "abc": false}
 	for text, want := range tests {

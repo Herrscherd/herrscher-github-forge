@@ -11,6 +11,7 @@ import (
 
 const (
 	lowQuotaDivisor     = 10
+	unknownRemaining    = -1
 	headerRetryAfter    = "Retry-After"
 	headerRateLimit     = "X-Ratelimit-Limit"
 	headerRateRemaining = "X-Ratelimit-Remaining"
@@ -49,13 +50,19 @@ func (q *quota) refusal(now time.Time) error {
 }
 
 func readRateLimit(header http.Header) contracts.ForgeRateLimit {
-	remaining, _ := parseCount(header.Get(headerRateRemaining))
+	remaining, known := parseCount(header.Get(headerRateRemaining))
+	if !known {
+		remaining = unknownRemaining
+	}
 	return contracts.ForgeRateLimit{Remaining: remaining, Reset: resetTime(header)}
 }
 
 func throttleReset(header http.Header, now time.Time) (time.Time, bool) {
 	if wait, ok := parseCount(header.Get(headerRetryAfter)); ok {
 		return now.Add(time.Duration(wait) * time.Second), true
+	}
+	if after, err := http.ParseTime(header.Get(headerRetryAfter)); err == nil {
+		return after, true
 	}
 	if header.Get(headerRateRemaining) == "0" {
 		return resetTime(header), true
