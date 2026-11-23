@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,6 +157,64 @@ func TestQuotaIgnoresOlderWindowArrivingLast(t *testing.T) {
 	q.observe(rateHeader(499, testNow().Add(time.Hour)))
 	if err := q.refusal(testNow()); err != nil {
 		t.Errorf("refusal after an older window arrived last = %v, want nil", err)
+	}
+}
+
+func zeroRemainingHeader() http.Header {
+	header := http.Header{}
+	header.Set(headerRateLimit, strconv.Itoa(testRateLimit))
+	header.Set(headerRateRemaining, "0")
+	return header
+}
+
+func TestQuotaZeroRemainingWithoutResetDoesNotRefuse(t *testing.T) {
+	var q quota
+	q.observe(zeroRemainingHeader())
+	if err := q.refusal(testNow()); err != nil {
+		t.Errorf("refusal with remaining 0 and no reset = %v, want nil: the forge did not say when the budget refills", err)
+	}
+}
+
+func TestReadRateLimitWithZeroRemainingAndNoResetKeepsZeroReset(t *testing.T) {
+	got := readRateLimit(zeroRemainingHeader())
+	if got.Remaining != 0 || !got.Reset.IsZero() {
+		t.Errorf("rate limit = %+v, want remaining 0 and the zero reset", got)
+	}
+}
+
+func TestQuotaConcurrentObserversKeepNewestWindowAndLowestCount(t *testing.T) {
+	var q quota
+	base := testNow()
+	newest := base.Add(3 * time.Hour)
+	var wg sync.WaitGroup
+	for worker := range 8 {
+		wg.Go(func() { observeWindowsAndRefuse(t, &q, base, worker) })
+	}
+	wg.Wait()
+	if !q.reset.Equal(newest) || q.remaining != 499 {
+		t.Fatalf("quota = reset %v remaining %d, want reset %v remaining 499", q.reset, q.remaining, newest)
+	}
+	var limited *contracts.ForgeRateLimitedError
+	if err := q.refusal(base); !errors.As(err, &limited) || !limited.Reset.Equal(newest) {
+		t.Errorf("refusal = %v, want ForgeRateLimitedError resetting at %v", err, newest)
+	}
+}
+
+func observeWindowsAndRefuse(t *testing.T, q *quota, base time.Time, worker int) {
+	t.Helper()
+	for step := range 50 {
+		q.observe(rateHeader(1, base.Add(time.Hour)))
+		q.observe(rateHeader(4000, base.Add(2*time.Hour)))
+		q.observe(rateHeader(499+worker*100+step, base.Add(3*time.Hour)))
+		assertRateLimitOrNoRefusal(t, q.refusal(base))
+	}
+}
+
+func assertRateLimitOrNoRefusal(t *testing.T, err error) {
+	t.Helper()
+	var limited *contracts.ForgeRateLimitedError
+	if err != nil && !errors.As(err, &limited) {
+		t.Errorf("refusal during observation = %v, want ForgeRateLimitedError or nil", err)
 	}
 }
 

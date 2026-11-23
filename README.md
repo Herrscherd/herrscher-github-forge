@@ -48,7 +48,7 @@ A repository on another host is refused with `ErrForgeWrongHost`, and a namespac
 
 - Response bodies are read up to 8 MiB. A larger body is refused.
 - At most 4 requests are in flight at once. A caller waiting for a slot stops when its context is done.
-- Every response updates the quota the plugin holds for the token (`x-ratelimit-limit`, `-remaining`, `-reset`). The quota is only taken from a response that carries both the limit and the remaining count. When the remaining budget is below 10% of the limit and the reset is still ahead, further calls are refused with `ForgeRateLimitedError` without being sent.
+- Every response updates the quota the plugin holds for the token (`x-ratelimit-limit`, `-remaining`, `-reset`). The quota is only taken from a response that carries both the limit and the remaining count. When the remaining budget is below 10% of the limit and the reset is still ahead, further calls are refused with `ForgeRateLimitedError` without being sent. A response with `x-ratelimit-remaining: 0` and no reset header does not refuse calls locally: the forge did not say when the budget refills, so the call is sent and the answer is taken as usual.
 - Responses that arrive out of order cannot roll the quota back. Within one reset window the lowest remaining count is kept. A window that resets later replaces the earlier one, and a response of an earlier window is ignored.
 - The rate limit a connection reports is the zero `ForgeRateLimit` (`Remaining` 0, `Reset` the zero time) when the response carries no `x-ratelimit-remaining` header: the forge did not say, as the contract documents for a missing reset.
 - A throttle `Retry-After` is read as a number of seconds or as an HTTP date.
