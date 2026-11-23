@@ -164,45 +164,50 @@ func TestChecksMissingObjectIsNotFound(t *testing.T) {
 
 func TestCheckRunStatusReadsEveryWaitingState(t *testing.T) {
 	for _, text := range []string{"QUEUED", "REQUESTED", "WAITING", "PENDING"} {
-		if got := checkRunStatus(text); got != contracts.CheckQueued {
-			t.Errorf("checkRunStatus(%q) = %v, want queued", text, got)
+		got, err := checkRunStatus(text)
+		if err != nil || got != contracts.CheckQueued {
+			t.Errorf("checkRunStatus(%q) = %v, %v; want queued", text, got, err)
 		}
 	}
 }
 
-func TestChecksUnknownCheckRunStatusHasNoStatus(t *testing.T) {
+func TestChecksRefusesUnknownCheckRunStatus(t *testing.T) {
 	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"__typename":"CheckRun","name":"x","status":"BOGUS","conclusion":null,"detailsUrl":"","databaseId":1,"checkSuite":null}]}}}}}`
 	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
-	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
-	if err != nil {
-		t.Fatalf("err = %v, want the listing to survive an unknown status", err)
-	}
-	if len(page.Items) != 1 || page.Items[0].Name != "x" {
-		t.Fatalf("items = %+v, want the check kept", page.Items)
-	}
-	if status := page.Items[0].Status; status != 0 {
-		t.Errorf("status = %v, want the zero value, which is no status", status)
-	}
-	if _, concluded := page.Items[0].Concluded(); concluded {
-		t.Error("an unknown status reports a conclusion")
+	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
+		t.Fatalf("err = %v, want errUnexpectedValue for an unknown check run status", err)
 	}
 }
 
-func TestChecksUnknownStatusContextStateHasNoStatus(t *testing.T) {
+func TestChecksRefusesUnknownStatusContextState(t *testing.T) {
 	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"__typename":"StatusContext","context":"ci/new","state":"BOGUS","targetUrl":""}]}}}}}`
 	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
-	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
-	if err != nil {
-		t.Fatalf("err = %v, want the listing to survive an unknown state", err)
+	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
+		t.Fatalf("err = %v, want errUnexpectedValue for an unknown status context state", err)
 	}
-	if len(page.Items) != 1 || page.Items[0].Name != "ci/new" {
-		t.Fatalf("items = %+v, want the check kept", page.Items)
+}
+
+const escapedE = "\\u00e9"
+
+func TestChecksQuotesUnknownStateBoundedASCII(t *testing.T) {
+	state := strings.Repeat("é", 100) + "TAIL"
+	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"__typename":"StatusContext","context":"ci/new","state":"` + state + `","targetUrl":""}]}}}}}`
+	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
+	_, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
+	if !errors.Is(err, errUnexpectedValue) {
+		t.Fatalf("err = %v, want errUnexpectedValue", err)
 	}
-	if status := page.Items[0].Status; status != 0 {
-		t.Errorf("status = %v, want the zero value, which is no status", status)
+	message := err.Error()
+	for index := range len(message) {
+		if message[index] >= 0x80 {
+			t.Fatalf("error %q holds a non-ASCII byte at %d", message, index)
+		}
 	}
-	if _, concluded := page.Items[0].Concluded(); concluded {
-		t.Error("an unknown state reports a conclusion")
+	if !strings.Contains(message, escapedE) {
+		t.Errorf("error %q does not quote the unknown state", message)
+	}
+	if strings.Contains(message, "TAIL") {
+		t.Errorf("error %q holds the whole unknown state, want it bounded", message)
 	}
 }
 

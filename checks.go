@@ -3,11 +3,15 @@ package github
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
-const actionsAppSlug = "github-actions"
+const (
+	actionsAppSlug = "github-actions"
+	maxQuotedValue = 64
+)
 
 const checksQuery = `query($owner: String!, $name: String!, $oid: GitObjectID!, $first: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -86,13 +90,17 @@ func (n checkNodeWire) toCheck(repo contracts.ForgeRepoRef, commit contracts.Com
 	case "CheckRun":
 		return n.checkRun(repo, commit)
 	case "StatusContext":
-		return n.statusContext(commit), nil
+		return n.statusContext(commit)
 	}
-	return contracts.Check{}, fmt.Errorf("check kind %q: %w", n.Typename, errUnexpectedValue)
+	return contracts.Check{}, fmt.Errorf("check kind %s: %w", quotedValue(n.Typename), errUnexpectedValue)
 }
 
 func (n checkNodeWire) checkRun(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Check, error) {
-	check := contracts.Check{Name: n.Name, Commit: commit, Status: checkRunStatus(n.Status), URL: n.DetailsURL}
+	status, err := checkRunStatus(n.Status)
+	if err != nil {
+		return contracts.Check{}, fmt.Errorf("check run %q: %w", n.Name, err)
+	}
+	check := contracts.Check{Name: n.Name, Commit: commit, Status: status, URL: n.DetailsURL}
 	if check.Status == contracts.CheckCompleted {
 		check.Conclusion = checkRunConclusion(n.Conclusion)
 	}
@@ -106,7 +114,7 @@ func (n checkNodeWire) checkRun(repo contracts.ForgeRepoRef, commit contracts.Co
 	return check, nil
 }
 
-func (n checkNodeWire) statusContext(commit contracts.CommitSHA) contracts.Check {
+func (n checkNodeWire) statusContext(commit contracts.CommitSHA) (contracts.Check, error) {
 	check := contracts.Check{Name: n.Context, Commit: commit, URL: n.TargetURL}
 	switch n.State {
 	case "SUCCESS":
@@ -117,20 +125,29 @@ func (n checkNodeWire) statusContext(commit contracts.CommitSHA) contracts.Check
 		check.Status = contracts.CheckInProgress
 	case "EXPECTED":
 		check.Status = contracts.CheckQueued
+	default:
+		return contracts.Check{}, fmt.Errorf("status context %q state %s: %w", n.Context, quotedValue(n.State), errUnexpectedValue)
 	}
-	return check
+	return check, nil
 }
 
-func checkRunStatus(text string) contracts.CheckStatus {
+func checkRunStatus(text string) (contracts.CheckStatus, error) {
 	switch text {
 	case "QUEUED", "REQUESTED", "WAITING", "PENDING":
-		return contracts.CheckQueued
+		return contracts.CheckQueued, nil
 	case "IN_PROGRESS":
-		return contracts.CheckInProgress
+		return contracts.CheckInProgress, nil
 	case "COMPLETED":
-		return contracts.CheckCompleted
+		return contracts.CheckCompleted, nil
 	}
-	return 0
+	return 0, fmt.Errorf("status %s: %w", quotedValue(text), errUnexpectedValue)
+}
+
+func quotedValue(text string) string {
+	if len(text) > maxQuotedValue {
+		return strconv.QuoteToASCII(text[:maxQuotedValue]) + "..."
+	}
+	return strconv.QuoteToASCII(text)
 }
 
 func checkRunConclusion(text string) contracts.CheckConclusion {
