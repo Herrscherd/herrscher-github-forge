@@ -86,18 +86,14 @@ func (n checkNodeWire) toCheck(repo contracts.ForgeRepoRef, commit contracts.Com
 	case "CheckRun":
 		return n.checkRun(repo, commit)
 	case "StatusContext":
-		return n.statusContext(commit)
+		return n.statusContext(commit), nil
 	}
 	return contracts.Check{}, fmt.Errorf("check kind %q: %w", n.Typename, errUnexpectedValue)
 }
 
 func (n checkNodeWire) checkRun(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Check, error) {
-	status, err := checkRunStatus(n.Status)
-	if err != nil {
-		return contracts.Check{}, err
-	}
-	check := contracts.Check{Name: n.Name, Commit: commit, Status: status, URL: n.DetailsURL}
-	if status == contracts.CheckCompleted {
+	check := contracts.Check{Name: n.Name, Commit: commit, Status: checkRunStatus(n.Status), URL: n.DetailsURL}
+	if check.Status == contracts.CheckCompleted {
 		check.Conclusion = checkRunConclusion(n.Conclusion)
 	}
 	if n.isActionsJob() {
@@ -110,8 +106,8 @@ func (n checkNodeWire) checkRun(repo contracts.ForgeRepoRef, commit contracts.Co
 	return check, nil
 }
 
-func (n checkNodeWire) statusContext(commit contracts.CommitSHA) (contracts.Check, error) {
-	check := contracts.Check{Name: n.Context, Commit: commit, URL: n.TargetURL}
+func (n checkNodeWire) statusContext(commit contracts.CommitSHA) contracts.Check {
+	check := contracts.Check{Name: n.Context, Commit: commit, URL: n.TargetURL, Status: contracts.CheckQueued}
 	switch n.State {
 	case "SUCCESS":
 		check.Status, check.Conclusion = contracts.CheckCompleted, contracts.ConclusionSuccess
@@ -119,24 +115,18 @@ func (n checkNodeWire) statusContext(commit contracts.CommitSHA) (contracts.Chec
 		check.Status, check.Conclusion = contracts.CheckCompleted, contracts.ConclusionFailure
 	case "PENDING":
 		check.Status = contracts.CheckInProgress
-	case "EXPECTED":
-		check.Status = contracts.CheckQueued
-	default:
-		return contracts.Check{}, fmt.Errorf("commit status %q: %w", n.State, errUnexpectedValue)
 	}
-	return check, nil
+	return check
 }
 
-func checkRunStatus(text string) (contracts.CheckStatus, error) {
+func checkRunStatus(text string) contracts.CheckStatus {
 	switch text {
-	case "QUEUED", "WAITING", "PENDING", "REQUESTED":
-		return contracts.CheckQueued, nil
 	case "IN_PROGRESS":
-		return contracts.CheckInProgress, nil
+		return contracts.CheckInProgress
 	case "COMPLETED":
-		return contracts.CheckCompleted, nil
+		return contracts.CheckCompleted
 	}
-	return 0, fmt.Errorf("check run status %q: %w", text, errUnexpectedValue)
+	return contracts.CheckQueued
 }
 
 func checkRunConclusion(text string) contracts.CheckConclusion {
@@ -183,11 +173,11 @@ func (f *forge) Checks(ctx context.Context, repo contracts.ForgeRepoRef, commit 
 		return contracts.Page[contracts.Check]{}, err
 	}
 	variables := map[string]any{
-		"owner": repo.Namespace(),
-		"name":  repo.Name(),
-		"oid":   commit.String(),
-		"first": limit,
-		"after": cursorVariable(page.Cursor),
+		"owner":       repo.Namespace(),
+		"name":        repo.Name(),
+		"oid":         commit.String(),
+		"first":       limit,
+		afterVariable: cursorVariable(page.Cursor),
 	}
 	var response checksResponse
 	if err := f.graphQL(ctx, checksQuery, variables, &response); err != nil {
