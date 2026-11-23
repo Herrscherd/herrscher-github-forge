@@ -56,7 +56,7 @@ A repository on another host is refused with `ErrForgeWrongHost`, and a namespac
 - Redirects: the plugin follows at most 10 redirects. The `Authorization` header is removed when a redirect changes the scheme, the host or the port of the origin it was sent to, so a job log served from storage on another host, or from a plain HTTP address, never receives the token.
 - Timeouts: the TLS handshake may take 10 s, the response headers 30 s, and an idle connection is kept 90 s. There is no timeout on the whole request, so a job log can stream.
 - Listings take a page of at most 100 items (default 30). A larger limit is refused with `ErrInvalidPageLimit`.
-- Review threads: each thread returns all its comments, read 100 per request. A thread with more than 20 pages of comments is refused with an error rather than returned partly. A thread deleted while its later comment pages are read is left out of the listing.
+- Review threads: each thread returns all its comments, read 100 per request. A thread with more than 20 pages of comments is refused with an error rather than returned partly. A thread deleted while its later comment pages are read is left out of the listing. A later comment page that answers with a node which is not a review thread is refused with an error instead, since only an absent node counts as deleted.
 
 ## Development
 

@@ -184,6 +184,26 @@ func TestReviewThreadsSkipsThreadDeletedBetweenPages(t *testing.T) {
 	}
 }
 
+func TestReviewThreadsRefusesLaterPageOfNodeThatIsNotAThread(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request sentGraphQL
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, followUp := request.Variables["threadId"]; followUp {
+			graphQLData(t, w, json.RawMessage(`{"node":{}}`))
+			return
+		}
+		graphQLData(t, w, json.RawMessage(threadWithTwoCommentPagesJSON))
+	})
+	f, _ := newTestForge(t, handler)
+	_, err := f.ReviewThreads(t.Context(), mustPullRef(t, testRepo(t)), contracts.PageRequest{})
+	if !errors.Is(err, errUnexpectedValue) {
+		t.Fatalf("err = %v, want errUnexpectedValue for a node that is not a review thread", err)
+	}
+}
+
 func TestReviewThreadsRefusesBadLimit(t *testing.T) {
 	f, _ := newTestForge(t, http.NewServeMux())
 	ref := mustPullRef(t, testRepo(t))

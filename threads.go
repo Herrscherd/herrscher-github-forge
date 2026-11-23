@@ -78,7 +78,7 @@ type threadCommentsWire struct {
 
 type threadCommentsResponse struct {
 	Node *struct {
-		Comments threadCommentsWire `json:"comments"`
+		Comments *threadCommentsWire `json:"comments"`
 	} `json:"node"`
 }
 
@@ -140,6 +140,9 @@ func (f *forge) allComments(ctx context.Context, threadID string, first threadCo
 		}
 		if response.Node == nil {
 			return nil, false, nil
+		}
+		if response.Node.Comments == nil {
+			return nil, false, fmt.Errorf("thread %s: node is not a review thread: %w", threadID, errUnexpectedValue)
 		}
 		nodes = append(nodes, response.Node.Comments.Nodes...)
 		page = response.Node.Comments.PageInfo
