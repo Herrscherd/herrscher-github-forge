@@ -129,6 +129,35 @@ func TestIssuesRefusesInvalidInputsWithoutSending(t *testing.T) {
 	}
 }
 
+func TestIssueRefusesPullRequestNumber(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues/4", func(w http.ResponseWriter, _ *http.Request) {
+		pr := issuePayload(4, "open")
+		pr["pull_request"] = map[string]string{"url": "x"}
+		writeJSON(t, w, http.StatusOK, pr)
+	})
+	f, _ := newTestForge(t, mux)
+	_, err := f.Issue(t.Context(), mustIssueRef(t, testRepo(t), 4))
+	if !errors.Is(err, ErrNamesPullRequest) {
+		t.Fatalf("err = %v, want ErrNamesPullRequest", err)
+	}
+	if !errors.Is(err, contracts.ErrForgeNotFound) {
+		t.Errorf("err = %v, want it to match ErrForgeNotFound too", err)
+	}
+}
+
+func TestIssuesRefusesLabelWithComma(t *testing.T) {
+	var calls atomic.Int32
+	f, _ := newTestForge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	query := contracts.IssueQuery{Labels: []string{"bug", "ui,mobile"}}
+	if _, err := f.Issues(t.Context(), testRepo(t), query, contracts.PageRequest{}); !errors.Is(err, ErrInvalidLabel) {
+		t.Fatalf("err = %v, want ErrInvalidLabel", err)
+	}
+	if calls.Load() != 0 {
+		t.Error("a listing with a comma label reached the server")
+	}
+}
+
 func TestNextPageCursorReadsLinkRelation(t *testing.T) {
 	tests := []struct {
 		name string
