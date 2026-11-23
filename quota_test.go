@@ -130,6 +130,17 @@ func TestQuotaKeepsLowerRemainingWithinOneWindow(t *testing.T) {
 	}
 }
 
+func TestQuotaTakesLowerCountOfSameWindowWhenItArrivesLast(t *testing.T) {
+	var q quota
+	reset := testNow().Add(time.Hour)
+	q.observe(rateHeader(4000, reset))
+	q.observe(rateHeader(499, reset))
+	var limited *contracts.ForgeRateLimitedError
+	if err := q.refusal(testNow()); !errors.As(err, &limited) {
+		t.Fatalf("refusal after a lower count in the same window = %v, want ForgeRateLimitedError", err)
+	}
+}
+
 func TestQuotaNewerWindowReplacesOlder(t *testing.T) {
 	var q quota
 	q.observe(rateHeader(499, testNow().Add(time.Hour)))
