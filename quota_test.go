@@ -102,14 +102,49 @@ func TestThrottleResetFromRetryAfterHTTPDate(t *testing.T) {
 	}
 }
 
-func TestReadRateLimitAbsentRemainingIsUnknown(t *testing.T) {
-	if got := readRateLimit(http.Header{}).Remaining; got != unknownRemaining {
-		t.Errorf("Remaining without the header = %d, want %d", got, unknownRemaining)
-	}
+func TestReadRateLimitWithoutRemainingSaysNothing(t *testing.T) {
 	header := http.Header{}
-	header.Set(headerRateRemaining, "7")
-	if got := readRateLimit(header).Remaining; got != 7 {
-		t.Errorf("Remaining with the header = %d, want 7", got)
+	header.Set(headerRateReset, strconv.FormatInt(testNow().Add(time.Hour).Unix(), 10))
+	got := readRateLimit(header)
+	if got.Remaining != 0 || !got.Reset.IsZero() {
+		t.Errorf("rate limit without remaining = %+v, want the zero value", got)
+	}
+}
+
+func TestReadRateLimitReportsRemainingAndReset(t *testing.T) {
+	reset := testNow().Add(time.Hour)
+	got := readRateLimit(rateHeader(7, reset))
+	if got.Remaining != 7 || !got.Reset.Equal(reset) {
+		t.Errorf("rate limit = %+v, want remaining 7 and reset %v", got, reset)
+	}
+}
+
+func TestQuotaKeepsLowerRemainingWithinOneWindow(t *testing.T) {
+	var q quota
+	reset := testNow().Add(time.Hour)
+	q.observe(rateHeader(499, reset))
+	q.observe(rateHeader(4000, reset))
+	var limited *contracts.ForgeRateLimitedError
+	if err := q.refusal(testNow()); !errors.As(err, &limited) {
+		t.Fatalf("refusal after a late, higher count in the same window = %v, want ForgeRateLimitedError", err)
+	}
+}
+
+func TestQuotaNewerWindowReplacesOlder(t *testing.T) {
+	var q quota
+	q.observe(rateHeader(499, testNow().Add(time.Hour)))
+	q.observe(rateHeader(4000, testNow().Add(2*time.Hour)))
+	if err := q.refusal(testNow()); err != nil {
+		t.Errorf("refusal after a newer window = %v, want nil", err)
+	}
+}
+
+func TestQuotaIgnoresOlderWindowArrivingLast(t *testing.T) {
+	var q quota
+	q.observe(rateHeader(4000, testNow().Add(2*time.Hour)))
+	q.observe(rateHeader(499, testNow().Add(time.Hour)))
+	if err := q.refusal(testNow()); err != nil {
+		t.Errorf("refusal after an older window arrived last = %v, want nil", err)
 	}
 }
 
