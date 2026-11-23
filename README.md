@@ -9,7 +9,7 @@ The plugin registers itself under the kind `github`, in the category `forge`. Th
 - Connection: who the token belongs to, where the token came from, its scopes and the rate limit left.
 - Repository access: the permission the account holds on one repository.
 - Pull requests: open, read (with ETag revisions, so an unchanged pull request is not re-read), and merge with a chosen method.
-- Checks: the check runs and commit statuses of a commit, paged. A check run that comes from GitHub Actions carries the identifier of its job, whose log can be read. A status or check run state the plugin does not know reads as queued, without a conclusion.
+- Checks: the check runs and commit statuses of a commit, paged. A check run that comes from GitHub Actions carries the identifier of its job, whose log can be read. A status or check run state the plugin does not know keeps the check with no status (the zero value of `CheckStatus`, which is not a status) and no conclusion, so a caller waiting for completion never reads it as queued.
 - Job logs: the tail of a CI job log, up to 1 MiB.
 - Review threads: the threads of a pull request, and replies to them.
 - Issues: one issue, and a filtered listing of issues (pull requests are left out of the listing and refused by number).
@@ -49,13 +49,14 @@ A repository on another host is refused with `ErrForgeWrongHost`, and a namespac
 - Response bodies are read up to 8 MiB. A larger body is refused.
 - At most 4 requests are in flight at once. A caller waiting for a slot stops when its context is done.
 - Every response updates the quota the plugin holds for the token (`x-ratelimit-limit`, `-remaining`, `-reset`). The quota is only taken from a response that carries both the limit and the remaining count. When the remaining budget is below 10% of the limit and the reset is still ahead, further calls are refused with `ForgeRateLimitedError` without being sent.
-- The rate limit a connection reports has `Remaining` set to -1 when the response carries no `x-ratelimit-remaining` header, since the contract has no unknown state.
+- Responses that arrive out of order cannot roll the quota back. Within one reset window the lowest remaining count is kept. A window that resets later replaces the earlier one, and a response of an earlier window is ignored.
+- The rate limit a connection reports is the zero `ForgeRateLimit` (`Remaining` 0, `Reset` the zero time) when the response carries no `x-ratelimit-remaining` header: the forge did not say, as the contract documents for a missing reset.
 - A throttle `Retry-After` is read as a number of seconds or as an HTTP date.
 - Job logs: the plugin keeps only the last bytes asked for. If the log is larger than 256 MiB it refuses with an error rather than returning a partial tail.
 - Redirects: the plugin follows at most 10 redirects. The `Authorization` header is removed when a redirect changes the scheme, the host or the port of the origin it was sent to, so a job log served from storage on another host, or from a plain HTTP address, never receives the token.
 - Timeouts: the TLS handshake may take 10 s, the response headers 30 s, and an idle connection is kept 90 s. There is no timeout on the whole request, so a job log can stream.
 - Listings take a page of at most 100 items (default 30). A larger limit is refused with `ErrInvalidPageLimit`.
-- Review threads: each thread returns all its comments, read 100 per request. A thread with more than 20 pages of comments is refused with an error rather than returned partly.
+- Review threads: each thread returns all its comments, read 100 per request. A thread with more than 20 pages of comments is refused with an error rather than returned partly. A thread deleted while its later comment pages are read is left out of the listing.
 
 ## Development
 
