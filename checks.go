@@ -107,7 +107,7 @@ func (n checkNodeWire) checkRun(repo contracts.ForgeRepoRef, commit contracts.Co
 }
 
 func (n checkNodeWire) statusContext(commit contracts.CommitSHA) contracts.Check {
-	check := contracts.Check{Name: n.Context, Commit: commit, URL: n.TargetURL, Status: contracts.CheckQueued}
+	check := contracts.Check{Name: n.Context, Commit: commit, URL: n.TargetURL}
 	switch n.State {
 	case "SUCCESS":
 		check.Status, check.Conclusion = contracts.CheckCompleted, contracts.ConclusionSuccess
@@ -115,18 +115,22 @@ func (n checkNodeWire) statusContext(commit contracts.CommitSHA) contracts.Check
 		check.Status, check.Conclusion = contracts.CheckCompleted, contracts.ConclusionFailure
 	case "PENDING":
 		check.Status = contracts.CheckInProgress
+	case "EXPECTED":
+		check.Status = contracts.CheckQueued
 	}
 	return check
 }
 
 func checkRunStatus(text string) contracts.CheckStatus {
 	switch text {
+	case "QUEUED", "REQUESTED", "WAITING", "PENDING":
+		return contracts.CheckQueued
 	case "IN_PROGRESS":
 		return contracts.CheckInProgress
 	case "COMPLETED":
 		return contracts.CheckCompleted
 	}
-	return contracts.CheckQueued
+	return 0
 }
 
 func checkRunConclusion(text string) contracts.CheckConclusion {
