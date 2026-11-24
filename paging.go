@@ -49,7 +49,12 @@ func nextPageCursor(link string) (contracts.PageCursor, error) {
 		if err != nil {
 			return "", fmt.Errorf("link header next target: %w", errUnexpectedValue)
 		}
-		return contracts.PageCursor(next.Query().Get("page")), nil
+		page := next.Query().Get("page")
+		number, err := strconv.Atoi(page)
+		if err != nil || number < 1 {
+			return "", fmt.Errorf("link header next page %q: %w", page, errUnexpectedValue)
+		}
+		return contracts.PageCursor(page), nil
 	}
 	return "", nil
 }

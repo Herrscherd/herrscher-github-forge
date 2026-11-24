@@ -231,6 +231,75 @@ func TestRepositoriesOnEnterpriseHost(t *testing.T) {
 	}
 }
 
+func pageWithLink(t *testing.T, link string, repos []map[string]any) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /user/repos", func(w http.ResponseWriter, _ *http.Request) {
+		if link != "" {
+			w.Header().Set(headerLink, link)
+		}
+		writeJSON(t, w, http.StatusOK, repos)
+	})
+	return mux
+}
+
+func TestRepositoriesRefusesInvalidCursorBeforeRequest(t *testing.T) {
+	var calls atomic.Int32
+	f, _ := newTestForge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	for _, cursor := range []contracts.PageCursor{"0", "-1", "abc"} {
+		if _, err := f.Repositories(t.Context(), contracts.PageRequest{Cursor: cursor}); !errors.Is(err, errInvalidCursor) {
+			t.Errorf("cursor %q: err = %v, want errInvalidCursor", cursor, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Error("a request was sent for an invalid cursor")
+	}
+}
+
+func TestRepositoriesPageOfOnlyRefusedRepositoriesKeepsNext(t *testing.T) {
+	var calls atomic.Int32
+	badBranch := repoPayload("bad-branch")
+	badBranch["default_branch"] = "feat..x"
+	otherHost := repoPayload("moved")
+	otherHost["clone_url"] = "https://ghe.example.com/acme/moved.git"
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /user/repos", func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set(headerLink, `<?page=2>; rel="next"`)
+		writeJSON(t, w, http.StatusOK, []map[string]any{badBranch, otherHost})
+	})
+	f, _ := newTestForge(t, mux)
+	page, err := f.Repositories(t.Context(), contracts.PageRequest{})
+	if err != nil {
+		t.Fatalf("a page of refused repositories failed: %v", err)
+	}
+	if len(page.Items) != 0 || page.Next != "2" {
+		t.Errorf("page = %d items, next %q; want 0 items, next \"2\"", len(page.Items), page.Next)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("calls = %d, want 1: the plugin must not fetch past an empty page", calls.Load())
+	}
+}
+
+func TestRepositoriesFollowsNextAmongPrevAndLast(t *testing.T) {
+	link := `<?page=1>; rel="prev", <?page=3>; rel="next", <?page=3>; rel="last"`
+	f, _ := newTestForge(t, pageWithLink(t, link, []map[string]any{repoPayload("one")}))
+	page, err := f.Repositories(t.Context(), contracts.PageRequest{Cursor: "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Next != "3" {
+		t.Errorf("page = %d items, next %q; want 1 item, next \"3\"", len(page.Items), page.Next)
+	}
+}
+
+func TestRepositoriesRefusesMalformedNextPageOnThatPage(t *testing.T) {
+	f, _ := newTestForge(t, pageWithLink(t, `<?page=abc>; rel="next"`, []map[string]any{repoPayload("one")}))
+	if _, err := f.Repositories(t.Context(), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
+		t.Fatalf("err = %v, want errUnexpectedValue", err)
+	}
+}
+
 func TestCheckListsRepositories(t *testing.T) {
 	var calls atomic.Int32
 	repos := []map[string]any{repoPayload("one"), repoPayload("two"), repoPayload("three")}

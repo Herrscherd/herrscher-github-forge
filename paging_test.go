@@ -48,6 +48,20 @@ func TestNextPageCursorRejectsMalformedTarget(t *testing.T) {
 	}
 }
 
+func TestNextPageCursorRefusesNextPageThatIsNotANumber(t *testing.T) {
+	links := []string{
+		`<https://api.github.com/x?page=abc>; rel="next"`,
+		`<https://api.github.com/x?page=0>; rel="next"`,
+		`<https://api.github.com/x?page=-1>; rel="next"`,
+		`<https://api.github.com/x>; rel="next"`,
+	}
+	for _, link := range links {
+		if _, err := nextPageCursor(link); !errors.Is(err, errUnexpectedValue) {
+			t.Errorf("link %q: err = %v, want errUnexpectedValue", link, err)
+		}
+	}
+}
+
 func TestAssociationOf(t *testing.T) {
 	tests := map[string]contracts.AuthorAssociation{
 		"":                       contracts.AssociationNone,

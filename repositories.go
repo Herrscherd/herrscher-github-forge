@@ -2,6 +2,8 @@ package github
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,18 +17,14 @@ const (
 	repoDirection   = "asc"
 )
 
-type repoOwnerWire struct {
-	Login string `json:"login"`
-}
-
 type repoListWire struct {
-	Owner         repoOwnerWire `json:"owner"`
-	Name          string        `json:"name"`
-	CloneURL      string        `json:"clone_url"`
-	Description   *string       `json:"description"`
-	Private       bool          `json:"private"`
-	Archived      bool          `json:"archived"`
-	DefaultBranch string        `json:"default_branch"`
+	Owner         userWire `json:"owner"`
+	Name          string   `json:"name"`
+	CloneURL      string   `json:"clone_url"`
+	Description   *string  `json:"description"`
+	Private       bool     `json:"private"`
+	Archived      bool     `json:"archived"`
+	DefaultBranch string   `json:"default_branch"`
 }
 
 func (f *forge) Repositories(ctx context.Context, page contracts.PageRequest) (contracts.Page[contracts.ForgeRepo], error) {
@@ -52,7 +50,11 @@ func (f *forge) Repositories(ctx context.Context, page contracts.PageRequest) (c
 		if err := decodeJSON(resp.Body, &wires); err != nil {
 			return err
 		}
-		items = f.listedRepos(wires)
+		var listErr error
+		items, listErr = f.listedRepos(wires)
+		if listErr != nil {
+			return listErr
+		}
 		var cursorErr error
 		next, cursorErr = nextPageCursor(resp.Header.Get(headerLink))
 		return cursorErr
@@ -63,26 +65,29 @@ func (f *forge) Repositories(ctx context.Context, page contracts.PageRequest) (c
 	return contracts.Page[contracts.ForgeRepo]{Items: items, Next: next}, nil
 }
 
-func (f *forge) listedRepos(wires []repoListWire) []contracts.ForgeRepo {
+func (f *forge) listedRepos(wires []repoListWire) ([]contracts.ForgeRepo, error) {
 	repos := make([]contracts.ForgeRepo, 0, len(wires))
 	for _, wire := range wires {
-		repo, ok := f.listedRepo(wire)
-		if !ok {
+		repo, err := f.listedRepo(wire)
+		if errors.Is(err, errRefusedRepo) {
 			continue
+		}
+		if err != nil {
+			return nil, err
 		}
 		repos = append(repos, repo)
 	}
-	return repos
+	return repos, nil
 }
 
-func (f *forge) listedRepo(wire repoListWire) (contracts.ForgeRepo, bool) {
+func (f *forge) listedRepo(wire repoListWire) (contracts.ForgeRepo, error) {
 	repo, err := contracts.ParseRepoRef(f.host.String() + "/" + wire.Owner.Login + "/" + wire.Name)
 	if err != nil {
-		return contracts.ForgeRepo{}, false
+		return contracts.ForgeRepo{}, refusedRepo(err)
 	}
 	branch, err := branchOf(wire.DefaultBranch)
 	if err != nil {
-		return contracts.ForgeRepo{}, false
+		return contracts.ForgeRepo{}, refusedRepo(err)
 	}
 	listed, err := contracts.NewForgeRepo(f.host, contracts.ForgeRepoFields{
 		Repo:          repo,
@@ -93,9 +98,13 @@ func (f *forge) listedRepo(wire repoListWire) (contracts.ForgeRepo, bool) {
 		DefaultBranch: branch,
 	})
 	if err != nil {
-		return contracts.ForgeRepo{}, false
+		return contracts.ForgeRepo{}, refusedRepo(err)
 	}
-	return listed, true
+	return listed, nil
+}
+
+func refusedRepo(err error) error {
+	return fmt.Errorf("%w: %w", errRefusedRepo, err)
 }
 
 func branchOf(text string) (contracts.BranchName, error) {

@@ -27,6 +27,7 @@ var (
 	errTooManyRedirects    = errors.New("forge redirected too many times")
 	errMissingCommit       = errors.New("commit is the zero value and names no commit")
 	errTooManyCommentPages = errors.New("review thread has more comment pages than the plugin reads")
+	errRefusedRepo         = errors.New("repository is refused by the contracts port and left out of the listing")
 )
 
 type graphQLError struct {
