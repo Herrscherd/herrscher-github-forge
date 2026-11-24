@@ -8,6 +8,7 @@ The plugin registers itself under the kind `github`, in the category `forge`. Th
 
 - Connection: who the token belongs to, where the token came from, its scopes and the rate limit left.
 - Repository access: the permission the account holds on one repository.
+- Repositories: the repositories the account can read (owned, collaborated on, or through an organization membership), listed a page at a time by name. A repository whose clone URL is not on the host, or whose default branch name git refuses, is left out of the page without failing it.
 - Pull requests: open, read (with ETag revisions, so an unchanged pull request is not re-read), and merge with a chosen method.
 - Checks: the check runs and commit statuses of a commit, paged. A check run that comes from GitHub Actions carries the identifier of its job, whose log can be read. A check run status, a status context state or a check kind the plugin does not know fails the read of the checks with an error that quotes the value, and no checks are returned. A check is never reported as waiting or finished by default, so a caller waiting for completion cannot loop on a state the plugin never mapped.
 - Job logs: the tail of a CI job log, up to 1 MiB.
