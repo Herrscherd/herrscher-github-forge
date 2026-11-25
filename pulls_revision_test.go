@@ -300,6 +300,28 @@ func TestPullRequestSeesCheckRunAddedToAFullFirstPageWithoutTotalCount(t *testin
 	}
 }
 
+func TestPullRequestCostWhenAProbeChainStopsAtAMultiPageListing(t *testing.T) {
+	fake := pagedOpenFake(t)
+	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+	for index := range 5 {
+		fake.statuses = append(fake.statuses, statusFixture(fmt.Sprintf("ci/%d", index), "success"))
+	}
+	fake.reviews = []map[string]any{reviewPayload(1, "APPROVED", "2026-11-20T09:00:00Z")}
+	revision := readFirstRevision(t, fake)
+	fake.resetCalls()
+	if _, err := readPullSince(t, fake, revision); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fake.snapshot()); got != 8 {
+		t.Errorf("requests = %d, want 8: 2 pull request, 1 probe and 1 page of check runs, 3 status pages, 1 review", got)
+	}
+	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 2, endpointStatuses: 3, endpointReviews: 1} {
+		if got := len(fake.callsTo(kind)); got != want {
+			t.Errorf("endpoint %d requests = %d, want %d", kind, got, want)
+		}
+	}
+}
+
 func TestPullRequestReadsAMultiPageListingInFullWhen304OmitsLink(t *testing.T) {
 	fake := pagedOpenFake(t)
 	fake.omitLink = true
