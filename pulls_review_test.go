@@ -20,7 +20,7 @@ func reviewPayload(id int64, state, submittedAt string) map[string]any {
 
 func readPullWith(t *testing.T, fake *fakeGitHub) (contracts.PullRequest, error) {
 	t.Helper()
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	return f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), "")
 }
 
@@ -103,7 +103,7 @@ func TestPullRequestCountsPendingCommitStatus(t *testing.T) {
 
 func TestPullRequestSummarizesChecksAcrossAllPages(t *testing.T) {
 	fake := openFake(t)
-	fake.pageSize = 1
+	fake.requestPageSize = 1
 	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "in_progress", ""), checkRunFixture(2, "lint", "completed", "failure")}
 	got, err := readPullWith(t, fake)
 	if err != nil {
@@ -170,7 +170,7 @@ func TestPullRequestDegradesForbiddenReviews(t *testing.T) {
 
 func TestPullRequestLatestReviewIsNewestAcrossPages(t *testing.T) {
 	fake := openFake(t)
-	fake.pageSize = 1
+	fake.requestPageSize = 1
 	fake.reviews = []map[string]any{
 		reviewPayload(12, "COMMENTED", "2026-11-20T09:00:00Z"),
 		reviewPayload(4, "COMMENTED", "2026-11-21T09:00:00Z"),
@@ -254,7 +254,7 @@ func TestPullRequestPropagatesReviewsReadError(t *testing.T) {
 
 func TestPullRequestDegradesReviewsOverTwentyPages(t *testing.T) {
 	fake := openFake(t)
-	fake.pageSize = 1
+	fake.requestPageSize = 1
 	for id := range maxListingPages + 1 {
 		fake.reviews = append(fake.reviews, reviewPayload(int64(id+1), "COMMENTED", "2026-11-20T09:00:00Z"))
 	}
@@ -269,7 +269,7 @@ func TestPullRequestDegradesReviewsOverTwentyPages(t *testing.T) {
 
 func TestPullRequestDegradesChecksOverTwentyPages(t *testing.T) {
 	fake := openFake(t)
-	fake.pageSize = 1
+	fake.requestPageSize = 1
 	for id := range maxListingPages + 1 {
 		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
 	}

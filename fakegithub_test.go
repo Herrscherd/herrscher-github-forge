@@ -30,23 +30,23 @@ type fakeCall struct {
 }
 
 type fakeGitHub struct {
-	t         *testing.T
-	mu        sync.Mutex
-	pageSize  int
-	omitLink  bool
-	omitTotal bool
-	pull      map[string]any
-	checkRuns []map[string]any
-	statuses  []map[string]any
-	reviews   []map[string]any
-	fail      map[endpoint]int
-	mergeCode int
-	calls     []fakeCall
+	t               *testing.T
+	mu              sync.Mutex
+	requestPageSize int
+	omitLink        bool
+	omitTotal       bool
+	pull            map[string]any
+	checkRuns       []map[string]any
+	statuses        []map[string]any
+	reviews         []map[string]any
+	fail            map[endpoint]int
+	mergeCode       int
+	calls           []fakeCall
 }
 
 func newFakeGitHub(t *testing.T, pull map[string]any) *fakeGitHub {
 	t.Helper()
-	return &fakeGitHub{t: t, pageSize: 100, pull: pull, fail: make(map[endpoint]int), mergeCode: http.StatusOK}
+	return &fakeGitHub{t: t, requestPageSize: listingPageSize, pull: pull, fail: make(map[endpoint]int), mergeCode: http.StatusOK}
 }
 
 func (g *fakeGitHub) edit(change func()) {
@@ -153,11 +153,27 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func perPageParam(r *http.Request) int {
+	size, err := strconv.Atoi(r.URL.Query().Get("per_page"))
+	if err != nil || size < 1 {
+		return 30
+	}
+	return min(size, 100)
+}
+
+func newFakeForge(tb testing.TB, fake *fakeGitHub) *forge {
+	tb.Helper()
+	f, _ := newTestForge(tb, fake)
+	f.pageSize = fake.requestPageSize
+	return f
+}
+
 func (g *fakeGitHub) servePage(w http.ResponseWriter, r *http.Request, items []map[string]any, wrap func([]map[string]any) any) {
-	last := max(1, (len(items)+g.pageSize-1)/g.pageSize)
+	size := perPageParam(r)
+	last := max(1, (len(items)+size-1)/size)
 	number := pageParam(r)
-	start := min((number-1)*g.pageSize, len(items))
-	end := min(start+g.pageSize, len(items))
+	start := min((number-1)*size, len(items))
+	end := min(start+size, len(items))
 	page := append([]map[string]any{}, items[start:end]...)
 	var links []string
 	if number < last {

@@ -40,7 +40,7 @@ func TestChecksMapsCheckRunsAndStatuses(t *testing.T) {
 		statusFixture("ci/pending", "pending"),
 		statusFixture("ci/ok", "success"),
 	}
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -95,14 +95,14 @@ func assertStatusesMapped(t *testing.T, items []contracts.Check) {
 
 func TestChecksPagesThroughBothListings(t *testing.T) {
 	fake := openFake(t)
-	fake.pageSize = 2
+	fake.requestPageSize = 2
 	fake.checkRuns = []map[string]any{
 		checkRunFixture(1, "r1", "completed", "success"),
 		checkRunFixture(2, "r2", "completed", "success"),
 		checkRunFixture(3, "r3", "completed", "success"),
 	}
 	fake.statuses = []map[string]any{statusFixture("ci/a", "success"), statusFixture("ci/b", "success")}
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	cursor := contracts.PageCursor("")
 	var names []string
 	for _, want := range [][]string{{"r1", "r2"}, {"r3", "ci/a"}, {"ci/b"}} {
@@ -130,7 +130,7 @@ func TestChecksDefaultLimitIsThirty(t *testing.T) {
 	for id := range 35 {
 		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
 	}
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	first, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestChecksDefaultLimitIsThirty(t *testing.T) {
 
 func TestChecksRefusesBadCursorBeforeAnyRequest(t *testing.T) {
 	fake := openFake(t)
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	for _, cursor := range []contracts.PageCursor{"-1", "x", "1.5"} {
 		if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{Cursor: cursor}); !errors.Is(err, errInvalidCursor) {
 			t.Errorf("cursor %q: err = %v, want errInvalidCursor", cursor, err)
@@ -162,7 +162,7 @@ func TestChecksRefusesBadCursorBeforeAnyRequest(t *testing.T) {
 
 func TestChecksRefusesBadLimitAndMissingCommit(t *testing.T) {
 	fake := openFake(t)
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{Limit: 101}); !errors.Is(err, contracts.ErrInvalidPageLimit) {
 		t.Errorf("limit 101: err = %v, want ErrInvalidPageLimit", err)
 	}
@@ -181,7 +181,7 @@ func TestChecksForbiddenOnEitherListingIsReturned(t *testing.T) {
 	for _, kind := range []endpoint{endpointCheckRuns, endpointStatuses} {
 		fake := openFake(t)
 		fake.fail[kind] = 403
-		f, _ := newTestForge(t, fake)
+		f := newFakeForge(t, fake)
 		page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 		if !errors.Is(err, contracts.ErrForgeForbidden) {
 			t.Errorf("endpoint %d refused: err = %v, want ErrForgeForbidden", kind, err)
@@ -207,9 +207,9 @@ func TestChecksRefusesListingOverTwentyPages(t *testing.T) {
 	}
 	for name, fillListing := range fill {
 		fake := openFake(t)
-		fake.pageSize = 1
+		fake.requestPageSize = 1
 		fillListing(fake)
-		f, _ := newTestForge(t, fake)
+		f := newFakeForge(t, fake)
 		page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 		if !errors.Is(err, errTooManyPages) {
 			t.Errorf("%s over %d pages: err = %v, want errTooManyPages", name, maxListingPages, err)
@@ -223,7 +223,7 @@ func TestChecksRefusesListingOverTwentyPages(t *testing.T) {
 func TestChecksMissingCommitIsNotFound(t *testing.T) {
 	fake := openFake(t)
 	fake.fail[endpointCheckRuns] = 404
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, contracts.ErrForgeNotFound) {
 		t.Fatalf("err = %v, want ErrForgeNotFound", err)
 	}
@@ -241,7 +241,7 @@ func TestCheckRunStatusReadsEveryWaitingState(t *testing.T) {
 func TestChecksRefusesUnknownCheckRunStatus(t *testing.T) {
 	fake := openFake(t)
 	fake.checkRuns = []map[string]any{checkRunFixture(1, "x", "bogus", "")}
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
 		t.Fatalf("err = %v, want errUnexpectedValue for an unknown check run status", err)
 	}
@@ -250,7 +250,7 @@ func TestChecksRefusesUnknownCheckRunStatus(t *testing.T) {
 func TestChecksRefusesUnknownStatusState(t *testing.T) {
 	fake := openFake(t)
 	fake.statuses = []map[string]any{statusFixture("ci/new", "bogus")}
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
 		t.Fatalf("err = %v, want errUnexpectedValue for an unknown status state", err)
 	}
@@ -259,7 +259,7 @@ func TestChecksRefusesUnknownStatusState(t *testing.T) {
 func TestChecksQuotesUnknownStateBoundedASCII(t *testing.T) {
 	fake := openFake(t)
 	fake.statuses = []map[string]any{statusFixture("ci/new", strings.Repeat("中", 100)+"TAIL")}
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	_, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if !errors.Is(err, errUnexpectedValue) {
 		t.Fatalf("err = %v, want errUnexpectedValue", err)
@@ -285,7 +285,7 @@ func TestChecksAgreesWithPullRequest(t *testing.T) {
 		checkRunFixture(2, "b", "in_progress", ""),
 	}
 	fake.statuses = []map[string]any{statusFixture("ci/ok", "success")}
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if err != nil {
 		t.Fatal(err)

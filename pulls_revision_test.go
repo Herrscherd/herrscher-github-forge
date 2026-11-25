@@ -14,7 +14,7 @@ const otherHeadSHA = "fedcba9876543210fedcba9876543210fedcba98"
 
 func readPullSince(t *testing.T, fake *fakeGitHub, since contracts.Revision) (contracts.PullRequest, error) {
 	t.Helper()
-	f, _ := newTestForge(t, fake)
+	f := newFakeForge(t, fake)
 	return f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), since)
 }
 
@@ -61,27 +61,25 @@ func TestPullRequestReportsCheckFailedAfterNotModifiedPull(t *testing.T) {
 
 func TestPullRequestSeesReviewOnNewLastPage(t *testing.T) {
 	fake := openFake(t)
-	fake.pageSize = 1
-	fake.reviews = []map[string]any{
-		reviewPayload(1, "COMMENTED", "2026-11-20T09:00:00Z"),
-		reviewPayload(2, "COMMENTED", "2026-11-21T09:00:00Z"),
+	for id := range 100 {
+		fake.reviews = append(fake.reviews, reviewPayload(int64(id+1), "COMMENTED", "2026-11-20T09:00:00Z"))
 	}
 	revision := readFirstRevision(t, fake)
 	fake.edit(func() {
-		fake.reviews = append(fake.reviews, reviewPayload(3, "APPROVED", "2026-11-22T09:00:00Z"))
+		fake.reviews = append(fake.reviews, reviewPayload(101, "APPROVED", "2026-11-22T09:00:00Z"))
 	})
 	got, err := readPullSince(t, fake, revision)
 	if err != nil {
 		t.Fatalf("err = %v, want the pull request with the new review", err)
 	}
-	if got.LatestReview != "3" {
-		t.Errorf("latest review = %q, want %q: the review was added on the new last page", got.LatestReview, "3")
+	if got.LatestReview != "101" {
+		t.Errorf("latest review = %q, want %q: the review was added on the new last page", got.LatestReview, "101")
 	}
 }
 
 func TestPullRequestRereadsWhenLastReviewPageChanges(t *testing.T) {
 	fake := openFake(t)
-	fake.pageSize = 1
+	fake.requestPageSize = 1
 	fake.reviews = []map[string]any{
 		reviewPayload(1, "COMMENTED", "2026-11-20T09:00:00Z"),
 		reviewPayload(2, "APPROVED", "2026-11-22T09:00:00Z"),
@@ -193,7 +191,7 @@ func parseRevisionError(t *testing.T, text string) error {
 func pagedOpenFake(t *testing.T) *fakeGitHub {
 	t.Helper()
 	fake := openFake(t)
-	fake.pageSize = 2
+	fake.requestPageSize = 2
 	return fake
 }
 

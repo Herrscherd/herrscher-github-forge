@@ -65,7 +65,7 @@ func readListing[Item any](ctx context.Context, client *forge, listing func(numb
 		if read == 1 {
 			state.firstETag = head.etag
 			state.last = max(head.links.last, 1)
-			state.firstFull = len(page) == listingPageSize
+			state.firstFull = len(page) == client.pageSize
 		}
 		items = append(items, page...)
 		if head.links.next == 0 {
@@ -88,7 +88,7 @@ func (f *forge) listingUnchanged(ctx context.Context, listing func(number int) *
 }
 
 func (f *forge) pagedRepoURL(repo contracts.ForgeRepoRef, query url.Values, number int, elements ...string) *url.URL {
-	query.Set("per_page", strconv.Itoa(listingPageSize))
+	query.Set("per_page", strconv.Itoa(f.pageSize))
 	query.Set("page", strconv.Itoa(number))
 	return f.repoURL(repo, query, elements...)
 }

@@ -185,7 +185,7 @@ func TestMergePullRequestRefusalReadsStateBack(t *testing.T) {
 		fake.mergeCode = status
 		fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "failure")}
 		fake.reviews = []map[string]any{reviewPayload(3, "APPROVED", "2026-11-20T09:00:00Z")}
-		f, _ := newTestForge(t, fake)
+		f := newFakeForge(t, fake)
 		var refused *contracts.ForgeMergeRefusedError
 		err := f.MergePullRequest(t.Context(), mustPullRef(t, testRepo(t)), contracts.MergeMethodSquash)
 		if !errors.As(err, &refused) {
