@@ -1,82 +1,61 @@
 package github
 
 import (
-	"encoding/json"
 	"errors"
-	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
-const testCommit = "0123456789abcdef0123456789abcdef01234567"
+const escapedCJK = `\u4e2d`
 
-func mustCommit(tb testing.TB) contracts.CommitSHA {
-	tb.Helper()
-	commit, err := contracts.ParseCommitSHA(testCommit)
-	if err != nil {
-		tb.Fatal(err)
+func actionsCheckRun(id int64, name, status, conclusion string) map[string]any {
+	run := checkRunFixture(id, name, status, conclusion)
+	run["app"] = map[string]any{"slug": "github-actions"}
+	return run
+}
+
+func checkNames(items []contracts.Check) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.Name)
 	}
-	return commit
+	return names
 }
-
-type sentGraphQL struct {
-	Query     string         `json:"query"`
-	Variables map[string]any `json:"variables"`
-}
-
-func graphQLHandler(t *testing.T, seen *sentGraphQL, data json.RawMessage) http.Handler {
-	t.Helper()
-	t.Helper()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/graphql" {
-			t.Errorf("GraphQL path = %q", r.URL.Path)
-		}
-		if seen != nil {
-			if err := json.NewDecoder(r.Body).Decode(seen); err != nil {
-				t.Fatal(err)
-			}
-		}
-		graphQLData(t, w, data)
-	})
-}
-
-const checksRollupJSON = `{"repository":{"object":{"statusCheckRollup":{"contexts":{
-  "pageInfo":{"hasNextPage":true,"endCursor":"c2"},
-  "nodes":[
-    {"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://x/1","databaseId":99,"checkSuite":{"app":{"slug":"github-actions"}}},
-    {"__typename":"CheckRun","name":"lint","status":"IN_PROGRESS","conclusion":null,"detailsUrl":"https://x/2","databaseId":100,"checkSuite":{"app":{"slug":"other-app"}}},
-    {"__typename":"CheckRun","name":"deploy","status":"WAITING","conclusion":null,"detailsUrl":"","databaseId":101,"checkSuite":{"app":{"slug":"other-app"}}},
-    {"__typename":"CheckRun","name":"stale","status":"COMPLETED","conclusion":"STALE","detailsUrl":"","databaseId":102,"checkSuite":null},
-    {"__typename":"StatusContext","context":"ci/legacy","state":"ERROR","targetUrl":"https://x/3"},
-    {"__typename":"StatusContext","context":"ci/pending","state":"PENDING","targetUrl":""},
-    {"__typename":"StatusContext","context":"ci/expected","state":"EXPECTED","targetUrl":""},
-    {"__typename":"StatusContext","context":"ci/ok","state":"SUCCESS","targetUrl":""}
-  ]}}}}}`
 
 func TestChecksMapsCheckRunsAndStatuses(t *testing.T) {
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(checksRollupJSON)))
+	fake := openFake(t)
+	test := actionsCheckRun(99, "test", "completed", "success")
+	test["details_url"] = "https://x/1"
+	fake.checkRuns = []map[string]any{
+		test,
+		checkRunFixture(100, "lint", "in_progress", ""),
+		checkRunFixture(101, "deploy", "waiting", ""),
+		checkRunFixture(102, "stale", "completed", "stale"),
+	}
+	fake.statuses = []map[string]any{
+		statusFixture("ci/legacy", "error"),
+		statusFixture("ci/pending", "pending"),
+		statusFixture("ci/ok", "success"),
+	}
+	f, _ := newTestForge(t, fake)
 	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Next != "c2" {
-		t.Errorf("next = %q, want c2", page.Next)
+	if page.Next != "" || len(page.Items) != 7 {
+		t.Fatalf("got %d checks, next %q; want 7 and no next", len(page.Items), page.Next)
 	}
-	if len(page.Items) != 8 {
-		t.Fatalf("got %d checks, want 8", len(page.Items))
+	got := page.Items[0]
+	if got.Status != contracts.CheckCompleted || got.Conclusion != contracts.ConclusionSuccess {
+		t.Errorf("test check = %v %v", got.Status, got.Conclusion)
 	}
-	test := page.Items[0]
-	if test.Status != contracts.CheckCompleted || test.Conclusion != contracts.ConclusionSuccess {
-		t.Errorf("test check = %v %v", test.Status, test.Conclusion)
+	if got.Job == nil || got.Job.ID() != 99 || got.Job.Repo() != testRepo(t) {
+		t.Errorf("Actions check job = %+v, want job 99", got.Job)
 	}
-	if test.Job == nil || test.Job.ID() != 99 || test.Job.Repo() != testRepo(t) {
-		t.Errorf("Actions check job = %+v, want job 99", test.Job)
-	}
-	if test.Commit != mustCommit(t) || test.URL != "https://x/1" {
-		t.Errorf("test check commit or URL = %s %q", test.Commit, test.URL)
+	if got.Commit != mustCommit(t) || got.URL != "https://x/1" {
+		t.Errorf("test check commit or URL = %s %q", got.Commit, got.URL)
 	}
 	lint := page.Items[1]
 	if lint.Status != contracts.CheckInProgress || lint.Job != nil {
@@ -86,61 +65,93 @@ func TestChecksMapsCheckRunsAndStatuses(t *testing.T) {
 		t.Error("a running check reports a conclusion")
 	}
 	if page.Items[2].Status != contracts.CheckQueued {
-		t.Errorf("WAITING check status = %v, want queued", page.Items[2].Status)
+		t.Errorf("waiting check status = %v, want queued", page.Items[2].Status)
 	}
 	if got := page.Items[3].Conclusion; got != contracts.ConclusionOther {
 		t.Errorf("unknown completed conclusion = %v, want other", got)
 	}
-	if c, _ := page.Items[3].Concluded(); c == contracts.ConclusionNone {
-		t.Error("a completed check mapped to no conclusion")
-	}
-}
-
-func TestChecksMapsStatusContexts(t *testing.T) {
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(checksRollupJSON)))
-	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
 	legacy := page.Items[4]
-	if legacy.Name != "ci/legacy" || legacy.Conclusion != contracts.ConclusionFailure || legacy.Status != contracts.CheckCompleted {
-		t.Errorf("ERROR status = %+v", legacy)
+	if legacy.Name != "ci/legacy" || legacy.Status != contracts.CheckCompleted || legacy.Conclusion != contracts.ConclusionFailure {
+		t.Errorf("error status = %+v", legacy)
 	}
-	if page.Items[5].Status != contracts.CheckInProgress || page.Items[6].Status != contracts.CheckQueued {
-		t.Errorf("pending or expected status = %v %v", page.Items[5].Status, page.Items[6].Status)
+	if page.Items[5].Status != contracts.CheckInProgress {
+		t.Errorf("pending status = %v, want in progress", page.Items[5].Status)
 	}
-	if page.Items[7].Conclusion != contracts.ConclusionSuccess {
-		t.Errorf("SUCCESS status conclusion = %v", page.Items[7].Conclusion)
+	if page.Items[6].Conclusion != contracts.ConclusionSuccess {
+		t.Errorf("success status conclusion = %v", page.Items[6].Conclusion)
 	}
 }
 
-func TestChecksSendsDefaultLimitAndCursor(t *testing.T) {
-	var seen sentGraphQL
-	f, _ := newTestForge(t, graphQLHandler(t, &seen, json.RawMessage(`{"repository":{"object":{"statusCheckRollup":null}}}`)))
-	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{Cursor: "c1"})
+func TestChecksPagesThroughBothListings(t *testing.T) {
+	fake := openFake(t)
+	fake.pageSize = 2
+	fake.checkRuns = []map[string]any{
+		checkRunFixture(1, "r1", "completed", "success"),
+		checkRunFixture(2, "r2", "completed", "success"),
+		checkRunFixture(3, "r3", "completed", "success"),
+	}
+	fake.statuses = []map[string]any{statusFixture("ci/a", "success"), statusFixture("ci/b", "success")}
+	f, _ := newTestForge(t, fake)
+	cursor := contracts.PageCursor("")
+	var names []string
+	for _, want := range [][]string{{"r1", "r2"}, {"r3", "ci/a"}, {"ci/b"}} {
+		page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := checkNames(page.Items)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("page at cursor %q = %v, want %v", cursor, got, want)
+		}
+		names = append(names, got...)
+		cursor = page.Next
+	}
+	if cursor != "" {
+		t.Errorf("next after the last page = %q, want empty", cursor)
+	}
+	if len(names) != 5 {
+		t.Errorf("read %d checks across pages, want 5", len(names))
+	}
+}
+
+func TestChecksDefaultLimitIsThirty(t *testing.T) {
+	fake := openFake(t)
+	for id := range 35 {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
+	}
+	f, _ := newTestForge(t, fake)
+	first, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) != 0 || page.Next != "" {
-		t.Errorf("empty rollup gave %+v", page)
+	if len(first.Items) != defaultPageSize || first.Next != "30" {
+		t.Errorf("first page = %d checks, next %q; want %d and next 30", len(first.Items), first.Next, defaultPageSize)
 	}
-	if seen.Variables["first"] != float64(defaultPageSize) {
-		t.Errorf("first = %v, want %d", seen.Variables["first"], defaultPageSize)
+	last, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{Cursor: first.Next})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if seen.Variables["after"] != "c1" {
-		t.Errorf("after = %v, want c1", seen.Variables["after"])
+	if len(last.Items) != 5 || last.Next != "" {
+		t.Errorf("last page = %d checks, next %q; want 5 and no next", len(last.Items), last.Next)
 	}
-	if seen.Variables["oid"] != testCommit || seen.Variables["owner"] != "acme" || seen.Variables["name"] != "widgets" {
-		t.Errorf("variables = %v", seen.Variables)
+}
+
+func TestChecksRefusesBadCursorBeforeAnyRequest(t *testing.T) {
+	fake := openFake(t)
+	f, _ := newTestForge(t, fake)
+	for _, cursor := range []contracts.PageCursor{"-1", "x", "1.5"} {
+		if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{Cursor: cursor}); !errors.Is(err, errInvalidCursor) {
+			t.Errorf("cursor %q: err = %v, want errInvalidCursor", cursor, err)
+		}
 	}
-	if !strings.Contains(seen.Query, "statusCheckRollup") {
-		t.Error("the query does not read statusCheckRollup")
+	if got := len(fake.snapshot()); got != 0 {
+		t.Errorf("refused cursors sent %d requests, want none", got)
 	}
 }
 
 func TestChecksRefusesBadLimitAndMissingCommit(t *testing.T) {
-	var calls atomic.Int32
-	f, _ := newTestForge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	fake := openFake(t)
+	f, _ := newTestForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{Limit: 101}); !errors.Is(err, contracts.ErrInvalidPageLimit) {
 		t.Errorf("limit 101: err = %v, want ErrInvalidPageLimit", err)
 	}
@@ -150,13 +161,30 @@ func TestChecksRefusesBadLimitAndMissingCommit(t *testing.T) {
 	if _, err := f.Checks(t.Context(), testRepo(t), contracts.CommitSHA{}, contracts.PageRequest{}); !errors.Is(err, errMissingCommit) {
 		t.Errorf("zero commit: err = %v, want errMissingCommit", err)
 	}
-	if calls.Load() != 0 {
-		t.Error("a refused call reached the server")
+	if got := len(fake.snapshot()); got != 0 {
+		t.Errorf("refused calls sent %d requests, want none", got)
 	}
 }
 
-func TestChecksMissingObjectIsNotFound(t *testing.T) {
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(`{"repository":{"object":null}}`)))
+func TestChecksForbiddenOnEitherListingIsReturned(t *testing.T) {
+	for _, kind := range []endpoint{endpointCheckRuns, endpointStatuses} {
+		fake := openFake(t)
+		fake.fail[kind] = 403
+		f, _ := newTestForge(t, fake)
+		page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
+		if !errors.Is(err, contracts.ErrForgeForbidden) {
+			t.Errorf("endpoint %d refused: err = %v, want ErrForgeForbidden", kind, err)
+		}
+		if len(page.Items) != 0 {
+			t.Errorf("endpoint %d refused: %d checks returned with the error", kind, len(page.Items))
+		}
+	}
+}
+
+func TestChecksMissingCommitIsNotFound(t *testing.T) {
+	fake := openFake(t)
+	fake.fail[endpointCheckRuns] = 404
+	f, _ := newTestForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, contracts.ErrForgeNotFound) {
 		t.Fatalf("err = %v, want ErrForgeNotFound", err)
 	}
@@ -172,27 +200,27 @@ func TestCheckRunStatusReadsEveryWaitingState(t *testing.T) {
 }
 
 func TestChecksRefusesUnknownCheckRunStatus(t *testing.T) {
-	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"__typename":"CheckRun","name":"x","status":"BOGUS","conclusion":null,"detailsUrl":"","databaseId":1,"checkSuite":null}]}}}}}`
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
+	fake := openFake(t)
+	fake.checkRuns = []map[string]any{checkRunFixture(1, "x", "bogus", "")}
+	f, _ := newTestForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
 		t.Fatalf("err = %v, want errUnexpectedValue for an unknown check run status", err)
 	}
 }
 
-func TestChecksRefusesUnknownStatusContextState(t *testing.T) {
-	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"__typename":"StatusContext","context":"ci/new","state":"BOGUS","targetUrl":""}]}}}}}`
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
+func TestChecksRefusesUnknownStatusState(t *testing.T) {
+	fake := openFake(t)
+	fake.statuses = []map[string]any{statusFixture("ci/new", "bogus")}
+	f, _ := newTestForge(t, fake)
 	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
-		t.Fatalf("err = %v, want errUnexpectedValue for an unknown status context state", err)
+		t.Fatalf("err = %v, want errUnexpectedValue for an unknown status state", err)
 	}
 }
 
-const escapedE = "\\u00e9"
-
 func TestChecksQuotesUnknownStateBoundedASCII(t *testing.T) {
-	state := strings.Repeat("é", 100) + "TAIL"
-	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"__typename":"StatusContext","context":"ci/new","state":"` + state + `","targetUrl":""}]}}}}}`
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
+	fake := openFake(t)
+	fake.statuses = []map[string]any{statusFixture("ci/new", strings.Repeat("中", 100)+"TAIL")}
+	f, _ := newTestForge(t, fake)
 	_, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if !errors.Is(err, errUnexpectedValue) {
 		t.Fatalf("err = %v, want errUnexpectedValue", err)
@@ -203,7 +231,7 @@ func TestChecksQuotesUnknownStateBoundedASCII(t *testing.T) {
 			t.Fatalf("error %q holds a non-ASCII byte at %d", message, index)
 		}
 	}
-	if !strings.Contains(message, escapedE) {
+	if !strings.Contains(message, escapedCJK) {
 		t.Errorf("error %q does not quote the unknown state", message)
 	}
 	if strings.Contains(message, "TAIL") {
@@ -211,22 +239,23 @@ func TestChecksQuotesUnknownStateBoundedASCII(t *testing.T) {
 	}
 }
 
-func TestChecksRefusesUnknownCheckKind(t *testing.T) {
-	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"__typename":"Mystery"}]}}}}}`
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
-	if _, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{}); !errors.Is(err, errUnexpectedValue) {
-		t.Fatalf("err = %v, want errUnexpectedValue", err)
+func TestChecksAgreesWithPullRequest(t *testing.T) {
+	fake := openFake(t)
+	fake.checkRuns = []map[string]any{
+		checkRunFixture(1, "a", "completed", "failure"),
+		checkRunFixture(2, "b", "in_progress", ""),
 	}
-}
-
-func TestChecksLastPageHasNoNextCursor(t *testing.T) {
-	data := `{"repository":{"object":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":"c9"},"nodes":[]}}}}}`
-	f, _ := newTestForge(t, graphQLHandler(t, nil, json.RawMessage(data)))
+	fake.statuses = []map[string]any{statusFixture("ci/ok", "success")}
+	f, _ := newTestForge(t, fake)
 	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Next != "" {
-		t.Errorf("next = %q on the last page, want empty", page.Next)
+	pull, err := readPullWith(t, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := contracts.SummarizeChecks(page.Items); pull.Checks != want || want == contracts.ChecksUnknown {
+		t.Errorf("pull request checks = %v, the listing summarizes to %v", pull.Checks, want)
 	}
 }

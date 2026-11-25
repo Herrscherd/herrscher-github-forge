@@ -16,95 +16,6 @@ const (
 	maxQuotedValue = 64
 )
 
-const checksQuery = `query($owner: String!, $name: String!, $oid: GitObjectID!, $first: Int!, $after: String) {
-  repository(owner: $owner, name: $name) {
-    object(oid: $oid) {
-      ... on Commit {
-        statusCheckRollup {
-          contexts(first: $first, after: $after) {
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              __typename
-              ... on CheckRun {
-                name status conclusion detailsUrl databaseId
-                checkSuite { app { slug } }
-              }
-              ... on StatusContext {
-                context state targetUrl
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}`
-
-type checksResponse struct {
-	Repository *struct {
-		Object *struct {
-			StatusCheckRollup *struct {
-				Contexts contextsWire `json:"contexts"`
-			} `json:"statusCheckRollup"`
-		} `json:"object"`
-	} `json:"repository"`
-}
-
-type contextsWire struct {
-	PageInfo pageInfoWire    `json:"pageInfo"`
-	Nodes    []checkNodeWire `json:"nodes"`
-}
-
-type pageInfoWire struct {
-	HasNextPage bool   `json:"hasNextPage"`
-	EndCursor   string `json:"endCursor"`
-}
-
-func (p pageInfoWire) cursor() contracts.PageCursor {
-	if !p.HasNextPage {
-		return ""
-	}
-	return contracts.PageCursor(p.EndCursor)
-}
-
-type checkNodeWire struct {
-	Typename   string `json:"__typename"`
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-	DetailsURL string `json:"detailsUrl"`
-	DatabaseID int64  `json:"databaseId"`
-	CheckSuite *struct {
-		App *struct {
-			Slug string `json:"slug"`
-		} `json:"app"`
-	} `json:"checkSuite"`
-	Context   string `json:"context"`
-	State     string `json:"state"`
-	TargetURL string `json:"targetUrl"`
-}
-
-func (n checkNodeWire) isActionsJob() bool {
-	return n.CheckSuite != nil && n.CheckSuite.App != nil && n.CheckSuite.App.Slug == actionsAppSlug
-}
-
-func (n checkNodeWire) toCheck(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Check, error) {
-	switch n.Typename {
-	case "CheckRun":
-		return checkRunCheck(repo, commit, checkRunFacts{
-			name:        n.Name,
-			status:      n.Status,
-			conclusion:  n.Conclusion,
-			url:         n.DetailsURL,
-			jobID:       n.DatabaseID,
-			fromActions: n.isActionsJob(),
-		})
-	case "StatusContext":
-		return statusCheck(commit, n.Context, n.State, n.TargetURL)
-	}
-	return contracts.Check{}, fmt.Errorf("check kind %s: %w", quotedValue(n.Typename), errUnexpectedValue)
-}
-
 type checkRunFacts struct {
 	name        string
 	status      string
@@ -189,18 +100,6 @@ func checkRunConclusion(text string) contracts.CheckConclusion {
 	return contracts.ConclusionOther
 }
 
-func (c contextsWire) toPage(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Page[contracts.Check], error) {
-	items := make([]contracts.Check, 0, len(c.Nodes))
-	for index := range c.Nodes {
-		check, err := c.Nodes[index].toCheck(repo, commit)
-		if err != nil {
-			return contracts.Page[contracts.Check]{}, err
-		}
-		items = append(items, check)
-	}
-	return contracts.Page[contracts.Check]{Items: items, Next: c.PageInfo.cursor()}, nil
-}
-
 func (f *forge) Checks(ctx context.Context, repo contracts.ForgeRepoRef, commit contracts.CommitSHA, page contracts.PageRequest) (contracts.Page[contracts.Check], error) {
 	if err := f.checkRepo(repo); err != nil {
 		return contracts.Page[contracts.Check]{}, err
@@ -212,25 +111,42 @@ func (f *forge) Checks(ctx context.Context, repo contracts.ForgeRepoRef, commit 
 	if err != nil {
 		return contracts.Page[contracts.Check]{}, err
 	}
-	variables := map[string]any{
-		"owner":       repo.Namespace(),
-		"name":        repo.Name(),
-		"oid":         commit.String(),
-		"first":       limit,
-		afterVariable: cursorVariable(page.Cursor),
-	}
-	var response checksResponse
-	if err := f.graphQL(ctx, checksQuery, variables, &response); err != nil {
+	offset, err := checkOffset(page.Cursor)
+	if err != nil {
 		return contracts.Page[contracts.Check]{}, err
 	}
-	if response.Repository == nil || response.Repository.Object == nil {
-		return contracts.Page[contracts.Check]{}, fmt.Errorf("commit %s of %s: %w", commit, repo, contracts.ErrForgeNotFound)
+	runs, _, err := readListing(ctx, f, f.checkRunsListing(repo, commit), checkRunChecks(repo, commit))
+	if err != nil {
+		return contracts.Page[contracts.Check]{}, err
 	}
-	rollup := response.Repository.Object.StatusCheckRollup
-	if rollup == nil {
-		return contracts.Page[contracts.Check]{}, nil
+	statuses, _, err := readListing(ctx, f, f.statusListing(repo, commit), statusChecks(commit))
+	if err != nil {
+		return contracts.Page[contracts.Check]{}, err
 	}
-	return rollup.Contexts.toPage(repo, commit)
+	return checksPage(append(runs, statuses...), offset, limit), nil
+}
+
+func checkOffset(cursor contracts.PageCursor) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	offset, err := strconv.Atoi(string(cursor))
+	if err != nil || offset < 0 {
+		return 0, fmt.Errorf("%q: %w", cursor, errInvalidCursor)
+	}
+	return offset, nil
+}
+
+func checksPage(all []contracts.Check, offset, limit int) contracts.Page[contracts.Check] {
+	if offset >= len(all) {
+		return contracts.Page[contracts.Check]{}
+	}
+	end := min(offset+limit, len(all))
+	page := contracts.Page[contracts.Check]{Items: all[offset:end]}
+	if end < len(all) {
+		page.Next = contracts.PageCursor(strconv.Itoa(end))
+	}
+	return page
 }
 
 type checkRunsWire struct {
