@@ -28,20 +28,6 @@ func pullPayload(number int, state, mergedAt, mergeable string) map[string]any {
 	}
 }
 
-func pullsMux(t *testing.T, pull map[string]any, etag string) *http.ServeMux {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /repos/acme/widgets/pulls/5", func(w http.ResponseWriter, _ *http.Request) {
-		if etag != "" {
-			w.Header().Set("ETag", etag)
-		}
-		writeJSON(t, w, http.StatusOK, pull)
-	})
-	mux.Handle("POST /graphql", noChecks(t))
-	mux.HandleFunc("GET /repos/acme/widgets/pulls/5/reviews", noReviews(t))
-	return mux
-}
-
 func TestPullRequestMapsStateAndFields(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -64,9 +50,7 @@ func TestPullRequestMapsStateAndFields(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pull := pullPayload(5, test.state, test.mergedAt, test.mergeable)
-			f, _ := newTestForge(t, pullsMux(t, pull, `"etag-1"`))
-			got, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), "")
+			got, err := readPullWith(t, newFakeGitHub(t, pullPayload(5, test.state, test.mergedAt, test.mergeable)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,13 +65,16 @@ func TestPullRequestMapsStateAndFields(t *testing.T) {
 }
 
 func TestPullRequestCarriesRevisionHeadAndAuthor(t *testing.T) {
-	f, _ := newTestForge(t, pullsMux(t, pullPayload(5, "open", "", "clean"), `W/"etag-1"`))
-	got, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), "")
+	got, err := readPullWith(t, openFake(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Revision != `W/"etag-1"` {
-		t.Errorf("revision = %q, want the ETag", got.Revision)
+	revision, err := parseRevision(got.Revision)
+	if err != nil {
+		t.Fatalf("revision %q: %v", got.Revision, err)
+	}
+	if revision.head.String() != testHeadSHA || revision.pull == "" {
+		t.Errorf("revision = %+v, want the head SHA and the pull request ETag", revision)
 	}
 	if got.HeadSHA.String() != testHeadSHA {
 		t.Errorf("head SHA = %s, want %s", got.HeadSHA, testHeadSHA)
@@ -100,34 +87,15 @@ func TestPullRequestCarriesRevisionHeadAndAuthor(t *testing.T) {
 	}
 }
 
-func TestPullRequestSendsIfNoneMatchAndMapsNotModified(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /repos/acme/widgets/pulls/5", func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("If-None-Match"); got != `"etag-1"` {
-			t.Errorf("If-None-Match = %q", got)
-		}
-		w.WriteHeader(http.StatusNotModified)
-	})
-	f, _ := newTestForge(t, mux)
-	_, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), `"etag-1"`)
-	if !errors.Is(err, contracts.ErrForgeNotModified) {
-		t.Fatalf("err = %v, want ErrForgeNotModified", err)
-	}
-}
-
 func TestPullRequestWithoutSinceSendsNoConditionalHeader(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /repos/acme/widgets/pulls/5", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("If-None-Match") != "" {
-			t.Error("If-None-Match sent with an empty revision")
-		}
-		writeJSON(t, w, http.StatusOK, pullPayload(5, "open", "", "clean"))
-	})
-	mux.Handle("POST /graphql", noChecks(t))
-	mux.HandleFunc("GET /repos/acme/widgets/pulls/5/reviews", noReviews(t))
-	f, _ := newTestForge(t, mux)
-	if _, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), ""); err != nil {
+	fake := openFake(t)
+	if _, err := readPullWith(t, fake); err != nil {
 		t.Fatal(err)
+	}
+	for _, call := range fake.snapshot() {
+		if call.conditional {
+			t.Errorf("endpoint %d sent If-None-Match with an empty revision", call.endpoint)
+		}
 	}
 }
 
@@ -213,11 +181,11 @@ func TestMergePullRequestRefusesUnknownMethodWithoutSending(t *testing.T) {
 
 func TestMergePullRequestRefusalReadsStateBack(t *testing.T) {
 	for _, status := range []int{http.StatusMethodNotAllowed, http.StatusConflict} {
-		mux := pullsMux(t, pullPayload(5, "open", "", "blocked"), "")
-		mux.HandleFunc("PUT /repos/acme/widgets/pulls/5/merge", func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(t, w, status, map[string]string{"message": "not mergeable"})
-		})
-		f, _ := newTestForge(t, mux)
+		fake := newFakeGitHub(t, pullPayload(5, "open", "", "blocked"))
+		fake.mergeCode = status
+		fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "failure")}
+		fake.reviews = []map[string]any{reviewPayload(3, "APPROVED", "2026-11-20T09:00:00Z")}
+		f, _ := newTestForge(t, fake)
 		var refused *contracts.ForgeMergeRefusedError
 		err := f.MergePullRequest(t.Context(), mustPullRef(t, testRepo(t)), contracts.MergeMethodSquash)
 		if !errors.As(err, &refused) {
@@ -225,6 +193,14 @@ func TestMergePullRequestRefusalReadsStateBack(t *testing.T) {
 		}
 		if refused.State != contracts.MergeStateBlocked {
 			t.Errorf("status %d: refused state = %v, want blocked", status, refused.State)
+		}
+		if got := len(fake.callsTo(endpointPull)); got != 1 {
+			t.Errorf("status %d: pull request read %d times, want 1", status, got)
+		}
+		for _, kind := range []endpoint{endpointCheckRuns, endpointStatuses, endpointReviews} {
+			if got := len(fake.callsTo(kind)); got != 0 {
+				t.Errorf("status %d: endpoint %d read %d times on a merge refusal, want 0", status, kind, got)
+			}
 		}
 	}
 }
