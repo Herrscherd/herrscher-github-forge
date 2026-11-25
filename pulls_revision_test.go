@@ -374,13 +374,7 @@ func TestPullRequestReadsFullyWhenRevisionHasNoHead(t *testing.T) {
 	if headless == string(revision) {
 		t.Fatal("the revision holds no head to remove")
 	}
-	var conditional atomic.Int32
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(headerIfNoneMatch) != "" {
-			conditional.Add(1)
-		}
-		fake.ServeHTTP(w, r)
-	})
+	handler, conditional := countConditional(fake)
 	f, _ := newTestForge(t, handler)
 	_, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), contracts.Revision(headless))
 	if errors.Is(err, contracts.ErrForgeNotModified) {
@@ -421,5 +415,38 @@ func TestPullRequestAtRestCostsFourNotModifiedProbesAndNoQuota(t *testing.T) {
 	}
 	if after := quotaRemaining(f); after != before {
 		t.Errorf("quota remaining = %d, want %d: a 304 costs no quota", after, before)
+	}
+}
+
+func countConditional(fake *fakeGitHub) (http.Handler, *atomic.Int32) {
+	var conditional atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(headerIfNoneMatch) != "" {
+			conditional.Add(1)
+		}
+		fake.ServeHTTP(w, r)
+	})
+	return handler, &conditional
+}
+
+func TestPullRequestReadsInFullWhenFirstPageIsFullAtAnotherPageSize(t *testing.T) {
+	fake := openFake(t)
+	fake.requestPageSize = 2
+	fake.checkRuns = []map[string]any{
+		checkRunFixture(1, "build", "completed", "success"),
+		checkRunFixture(2, "lint", "completed", "success"),
+	}
+	revision := readFirstRevision(t, fake)
+	handler, conditional := countConditional(fake)
+	f, _ := newTestForge(t, handler)
+	_, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), revision)
+	if errors.Is(err, contracts.ErrForgeNotModified) {
+		t.Fatal("err = ErrForgeNotModified: a first page of 2 items is full at page size 2, so the 304 proves nothing")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := conditional.Load(); got != 1 {
+		t.Errorf("conditional requests = %d, want 1: only the pull request carries its validator, the full first page is never probed", got)
 	}
 }
