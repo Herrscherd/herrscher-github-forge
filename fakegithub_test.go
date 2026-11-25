@@ -34,6 +34,7 @@ type fakeGitHub struct {
 	mu        sync.Mutex
 	pageSize  int
 	omitLink  bool
+	omitTotal bool
 	pull      map[string]any
 	checkRuns []map[string]any
 	statuses  []map[string]any
@@ -136,6 +137,9 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(g.t, w, g.mergeCode, map[string]bool{"merged": g.mergeCode == http.StatusOK})
 	case endpointCheckRuns:
 		g.servePage(w, r, g.checkRuns, func(page []map[string]any) any {
+			if g.omitTotal {
+				return map[string]any{"check_runs": page}
+			}
 			return map[string]any{"total_count": len(g.checkRuns), "check_runs": page}
 		})
 	case endpointStatuses:

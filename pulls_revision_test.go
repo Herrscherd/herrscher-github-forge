@@ -62,17 +62,20 @@ func TestPullRequestReportsCheckFailedAfterNotModifiedPull(t *testing.T) {
 func TestPullRequestSeesReviewOnNewLastPage(t *testing.T) {
 	fake := openFake(t)
 	fake.pageSize = 1
-	fake.reviews = []map[string]any{reviewPayload(1, "COMMENTED", "2026-11-20T09:00:00Z")}
+	fake.reviews = []map[string]any{
+		reviewPayload(1, "COMMENTED", "2026-11-20T09:00:00Z"),
+		reviewPayload(2, "COMMENTED", "2026-11-21T09:00:00Z"),
+	}
 	revision := readFirstRevision(t, fake)
 	fake.edit(func() {
-		fake.reviews = append(fake.reviews, reviewPayload(2, "APPROVED", "2026-11-22T09:00:00Z"))
+		fake.reviews = append(fake.reviews, reviewPayload(3, "APPROVED", "2026-11-22T09:00:00Z"))
 	})
 	got, err := readPullSince(t, fake, revision)
 	if err != nil {
 		t.Fatalf("err = %v, want the pull request with the new review", err)
 	}
-	if got.LatestReview != "2" {
-		t.Errorf("latest review = %q, want %q: the review was added on the last page", got.LatestReview, "2")
+	if got.LatestReview != "3" {
+		t.Errorf("latest review = %q, want %q: the review was added on the new last page", got.LatestReview, "3")
 	}
 }
 
@@ -128,7 +131,7 @@ func TestPullRequestRereadsWhenHeadSHAChanges(t *testing.T) {
 func TestPullRequestTreatsUnreadableRevisionAsAbsent(t *testing.T) {
 	fake := openFake(t)
 	valid := readFirstRevision(t, fake)
-	for _, since := range []contracts.Revision{"", "garbage", contracts.Revision(strings.Replace(string(valid), "v1", "v2", 1))} {
+	for _, since := range []contracts.Revision{"", "garbage", contracts.Revision(strings.Replace(string(valid), "v2", "v1", 1))} {
 		fake.resetCalls()
 		got, err := readPullSince(t, fake, since)
 		if err != nil {
@@ -145,7 +148,7 @@ func TestPullRequestTreatsUnreadableRevisionAsAbsent(t *testing.T) {
 
 func TestPullRequestRefusesRevisionOfAnotherVersion(t *testing.T) {
 	fake := openFake(t)
-	_, err := readPullSince(t, fake, "v2;pr=x;head=;checks=,0,;status=,0,;reviews=,0,")
+	_, err := readPullSince(t, fake, "v3;pr=x;head=;checks=,1,false;status=,1,false;reviews=,1,false")
 	if err != nil {
 		t.Fatalf("err = %v, want a full read for a revision of another version", err)
 	}
@@ -258,14 +261,42 @@ func TestPullRequestNotModifiedWhenSinglePageListsUnchanged(t *testing.T) {
 	}
 }
 
-func TestPullRequestNotModifiedWhenA304OmitsLink(t *testing.T) {
+func TestPullRequestSeesReviewAddedToAFullFirstPage(t *testing.T) {
 	fake := openFake(t)
 	fake.omitLink = true
-	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+	for id := range 100 {
+		fake.reviews = append(fake.reviews, reviewPayload(int64(id+1), "COMMENTED", "2026-11-20T09:00:00Z"))
+	}
 	revision := readFirstRevision(t, fake)
-	fake.resetCalls()
-	if _, err := readPullSince(t, fake, revision); !errors.Is(err, contracts.ErrForgeNotModified) {
-		t.Fatalf("err = %v, want ErrForgeNotModified: the stored single page still holds", err)
+	fake.edit(func() {
+		fake.reviews = append(fake.reviews, reviewPayload(101, "APPROVED", "2026-11-22T09:00:00Z"))
+	})
+	got, err := readPullSince(t, fake, revision)
+	if err != nil {
+		t.Fatalf("err = %v, want the pull request with the review on the second page", err)
+	}
+	if got.LatestReview != "101" {
+		t.Errorf("latest review = %q, want %q: the first page was full, so its 304 proves nothing", got.LatestReview, "101")
+	}
+}
+
+func TestPullRequestSeesCheckRunAddedToAFullFirstPageWithoutTotalCount(t *testing.T) {
+	fake := openFake(t)
+	fake.omitLink = true
+	fake.omitTotal = true
+	for id := range 100 {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
+	}
+	revision := readFirstRevision(t, fake)
+	fake.edit(func() {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(101, "job", "completed", "failure"))
+	})
+	got, err := readPullSince(t, fake, revision)
+	if err != nil {
+		t.Fatalf("err = %v, want the pull request with the failed check on the second page", err)
+	}
+	if got.Checks != contracts.ChecksFailed {
+		t.Errorf("checks = %v, want %v: the first page was full, so its 304 proves nothing", got.Checks, contracts.ChecksFailed)
 	}
 }
 
