@@ -315,7 +315,7 @@ func TestPullRequestCostWhenAProbeChainStopsAtAMultiPageListing(t *testing.T) {
 	if got := len(fake.snapshot()); got != 8 {
 		t.Errorf("requests = %d, want 8: 2 pull request, 1 probe and 1 page of check runs, 3 status pages, 1 review", got)
 	}
-	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 2, endpointStatuses: 3, endpointReviews: 1} {
+	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 2, endpointStatuses: 3, endpointReviews: 1, endpointMerge: 0} {
 		if got := len(fake.callsTo(kind)); got != want {
 			t.Errorf("endpoint %d requests = %d, want %d", kind, got, want)
 		}
