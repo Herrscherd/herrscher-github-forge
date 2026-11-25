@@ -33,6 +33,7 @@ type fakeGitHub struct {
 	t         *testing.T
 	mu        sync.Mutex
 	pageSize  int
+	omitLink  bool
 	pull      map[string]any
 	checkRuns []map[string]any
 	statuses  []map[string]any
@@ -172,10 +173,11 @@ func (g *fakeGitHub) respond(w http.ResponseWriter, r *http.Request, body any, l
 	sum := sha256.Sum256(data)
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 	w.Header().Set(headerETag, etag)
-	if link != "" {
+	notModified := r.Header.Get(headerIfNoneMatch) == etag
+	if link != "" && !(notModified && g.omitLink) {
 		w.Header().Set(headerLink, link)
 	}
-	if r.Header.Get(headerIfNoneMatch) == etag {
+	if notModified {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}

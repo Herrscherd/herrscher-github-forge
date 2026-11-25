@@ -253,3 +253,30 @@ func TestPullRequestNotModifiedWhenSinglePageListsUnchanged(t *testing.T) {
 		t.Fatalf("err = %v, want ErrForgeNotModified for single-page listings", err)
 	}
 }
+
+func TestPullRequestNotModifiedWhenA304OmitsLink(t *testing.T) {
+	fake := openFake(t)
+	fake.omitLink = true
+	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+	revision := readFirstRevision(t, fake)
+	fake.resetCalls()
+	if _, err := readPullSince(t, fake, revision); !errors.Is(err, contracts.ErrForgeNotModified) {
+		t.Fatalf("err = %v, want ErrForgeNotModified: the stored single page still holds", err)
+	}
+}
+
+func TestPullRequestReadsAMultiPageListingInFullWhen304OmitsLink(t *testing.T) {
+	fake := pagedOpenFake(t)
+	fake.omitLink = true
+	for id := range 3 {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
+	}
+	revision := readFirstRevision(t, fake)
+	fake.resetCalls()
+	if _, err := readPullSince(t, fake, revision); err != nil {
+		t.Fatalf("err = %v, want a full read: the revision records two pages", err)
+	}
+	if got := len(fake.callsTo(endpointCheckRuns)); got != 2 {
+		t.Errorf("check-run requests = %d, want 2: the probe is skipped and both pages are read", got)
+	}
+}

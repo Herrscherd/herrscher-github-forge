@@ -81,7 +81,11 @@ func (f *forge) listingUnchanged(ctx context.Context, listing func(number int) *
 	if err != nil || !first.notModified {
 		return false, err
 	}
-	return max(first.links.last, 1) == 1, nil
+	last := first.links.last
+	if last == 0 {
+		last = prev.last
+	}
+	return last == 1, nil
 }
 
 func (f *forge) pagedRepoURL(repo contracts.ForgeRepoRef, query url.Values, number int, elements ...string) *url.URL {
