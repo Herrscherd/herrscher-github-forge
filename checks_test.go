@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -187,6 +188,34 @@ func TestChecksForbiddenOnEitherListingIsReturned(t *testing.T) {
 		}
 		if len(page.Items) != 0 {
 			t.Errorf("endpoint %d refused: %d checks returned with the error", kind, len(page.Items))
+		}
+	}
+}
+
+func TestChecksRefusesListingOverTwentyPages(t *testing.T) {
+	fill := map[string]func(*fakeGitHub){
+		"check runs": func(fake *fakeGitHub) {
+			for id := range maxListingPages + 1 {
+				fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
+			}
+		},
+		"statuses": func(fake *fakeGitHub) {
+			for index := range maxListingPages + 1 {
+				fake.statuses = append(fake.statuses, statusFixture(fmt.Sprintf("ci/%d", index), "success"))
+			}
+		},
+	}
+	for name, fillListing := range fill {
+		fake := openFake(t)
+		fake.pageSize = 1
+		fillListing(fake)
+		f, _ := newTestForge(t, fake)
+		page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
+		if !errors.Is(err, errTooManyPages) {
+			t.Errorf("%s over %d pages: err = %v, want errTooManyPages", name, maxListingPages, err)
+		}
+		if len(page.Items) != 0 {
+			t.Errorf("%s over %d pages: %d checks returned with the error, want none", name, maxListingPages, len(page.Items))
 		}
 	}
 }

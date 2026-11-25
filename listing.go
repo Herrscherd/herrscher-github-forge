@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -72,7 +73,7 @@ func readListing[Item any](ctx context.Context, client *forge, listing func(numb
 		}
 		number = head.links.next
 	}
-	return nil, listingState{}, errTooManyPages
+	return nil, listingState{}, fmt.Errorf("read more than %d pages: %w", maxListingPages, errTooManyPages)
 }
 
 func (f *forge) listingUnchanged(ctx context.Context, listing func(number int) *url.URL, prev listingState) (bool, error) {
