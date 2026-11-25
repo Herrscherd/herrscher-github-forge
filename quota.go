@@ -15,6 +15,8 @@ const (
 	headerRateLimit     = "X-Ratelimit-Limit"
 	headerRateRemaining = "X-Ratelimit-Remaining"
 	headerRateReset     = "X-Ratelimit-Reset"
+	headerRateResource  = "X-Ratelimit-Resource"
+	resourceCore        = "core"
 )
 
 type quota struct {
@@ -26,6 +28,9 @@ type quota struct {
 }
 
 func (q *quota) observe(header http.Header) {
+	if resource := header.Get(headerRateResource); resource != "" && resource != resourceCore {
+		return
+	}
 	limit, hasLimit := parseCount(header.Get(headerRateLimit))
 	remaining, hasRemaining := parseCount(header.Get(headerRateRemaining))
 	if !hasLimit || !hasRemaining {
