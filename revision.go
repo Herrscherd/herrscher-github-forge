@@ -11,7 +11,7 @@ import (
 
 const (
 	revisionVersion = "v1"
-	listingFields   = 3
+	listingFields   = 2
 )
 
 type revisionState struct {
@@ -101,7 +101,7 @@ func parseHead(text string) (contracts.CommitSHA, error) {
 }
 
 func (s listingState) encode() string {
-	return strings.Join([]string{url.QueryEscape(s.firstETag), strconv.Itoa(s.last), url.QueryEscape(s.lastETag)}, ",")
+	return strings.Join([]string{url.QueryEscape(s.firstETag), strconv.Itoa(s.last)}, ",")
 }
 
 func parseListing(text string) (listingState, error) {
@@ -117,9 +117,5 @@ func parseListing(text string) (listingState, error) {
 	if err != nil || last < 0 {
 		return listingState{}, fmt.Errorf("listing last page %s: %w", quotedValue(parts[1]), errUnreadableRevision)
 	}
-	lastETag, err := url.QueryUnescape(parts[2])
-	if err != nil {
-		return listingState{}, err
-	}
-	return listingState{firstETag: first, last: last, lastETag: lastETag}, nil
+	return listingState{firstETag: first, last: last}, nil
 }

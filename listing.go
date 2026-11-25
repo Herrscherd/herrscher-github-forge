@@ -19,7 +19,6 @@ const (
 type listingState struct {
 	firstETag string
 	last      int
-	lastETag  string
 }
 
 type pageHead struct {
@@ -65,9 +64,6 @@ func readListing[Item any](ctx context.Context, client *forge, listing func(numb
 			state.firstETag = head.etag
 			state.last = max(head.links.last, 1)
 		}
-		if number == state.last {
-			state.lastETag = head.etag
-		}
 		items = append(items, page...)
 		if head.links.next == 0 {
 			return items, state, nil
@@ -78,22 +74,14 @@ func readListing[Item any](ctx context.Context, client *forge, listing func(numb
 }
 
 func (f *forge) listingUnchanged(ctx context.Context, listing func(number int) *url.URL, prev listingState) (bool, error) {
+	if prev.last != 1 {
+		return false, nil
+	}
 	first, err := f.requestPage(ctx, listing(1), prev.firstETag, nil)
 	if err != nil || !first.notModified {
 		return false, err
 	}
-	last := max(first.links.last, 1)
-	if last != prev.last {
-		return false, nil
-	}
-	if last == 1 {
-		return true, nil
-	}
-	lastPage, err := f.requestPage(ctx, listing(last), prev.lastETag, nil)
-	if err != nil {
-		return false, err
-	}
-	return lastPage.notModified, nil
+	return max(first.links.last, 1) == 1, nil
 }
 
 func (f *forge) pagedRepoURL(repo contracts.ForgeRepoRef, query url.Values, number int, elements ...string) *url.URL {

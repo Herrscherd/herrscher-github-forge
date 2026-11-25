@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -180,4 +181,75 @@ func parseRevisionError(t *testing.T, text string) error {
 	t.Helper()
 	_, err := parseRevision(contracts.Revision(text))
 	return err
+}
+
+func pagedOpenFake(t *testing.T) *fakeGitHub {
+	t.Helper()
+	fake := openFake(t)
+	fake.pageSize = 2
+	return fake
+}
+
+func TestPullRequestRereadsWhenMiddleCheckRunPageChanges(t *testing.T) {
+	fake := pagedOpenFake(t)
+	for id := range 5 {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
+	}
+	revision := readFirstRevision(t, fake)
+	fake.edit(func() {
+		fake.checkRuns[2] = checkRunFixture(3, "job", "completed", "failure")
+	})
+	got, err := readPullSince(t, fake, revision)
+	if err != nil {
+		t.Fatalf("err = %v, want the pull request re-read: a middle check-run page changed", err)
+	}
+	if got.Checks != contracts.ChecksFailed {
+		t.Errorf("checks = %v, want %v", got.Checks, contracts.ChecksFailed)
+	}
+}
+
+func TestPullRequestRereadsWhenMiddleStatusPageChanges(t *testing.T) {
+	fake := pagedOpenFake(t)
+	for index := range 5 {
+		fake.statuses = append(fake.statuses, statusFixture(fmt.Sprintf("ci/%d", index), "success"))
+	}
+	revision := readFirstRevision(t, fake)
+	fake.edit(func() {
+		fake.statuses[2] = statusFixture("ci/2", "failure")
+	})
+	got, err := readPullSince(t, fake, revision)
+	if err != nil {
+		t.Fatalf("err = %v, want the pull request re-read: a middle status page changed", err)
+	}
+	if got.Checks != contracts.ChecksFailed {
+		t.Errorf("checks = %v, want %v", got.Checks, contracts.ChecksFailed)
+	}
+}
+
+func TestPullRequestRereadsWhenMiddleReviewPageChanges(t *testing.T) {
+	fake := pagedOpenFake(t)
+	for index := range 5 {
+		fake.reviews = append(fake.reviews, reviewPayload(int64(index+1), "COMMENTED", fmt.Sprintf("2026-11-%02dT09:00:00Z", 20+index)))
+	}
+	revision := readFirstRevision(t, fake)
+	fake.edit(func() {
+		fake.reviews[2] = reviewPayload(3, "APPROVED", "2026-11-26T09:00:00Z")
+	})
+	got, err := readPullSince(t, fake, revision)
+	if err != nil {
+		t.Fatalf("err = %v, want the pull request re-read: a middle review page changed", err)
+	}
+	if got.LatestReview != "3" {
+		t.Errorf("latest review = %q, want %q", got.LatestReview, "3")
+	}
+}
+
+func TestPullRequestNotModifiedWhenSinglePageListsUnchanged(t *testing.T) {
+	fake := openFake(t)
+	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+	revision := readFirstRevision(t, fake)
+	fake.resetCalls()
+	if _, err := readPullSince(t, fake, revision); !errors.Is(err, contracts.ErrForgeNotModified) {
+		t.Fatalf("err = %v, want ErrForgeNotModified for single-page listings", err)
+	}
 }
