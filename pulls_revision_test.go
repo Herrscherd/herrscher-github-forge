@@ -284,3 +284,25 @@ func TestPullRequestReadsAMultiPageListingInFullWhen304OmitsLink(t *testing.T) {
 		t.Errorf("check-run requests = %d, want 2: the probe is skipped and both pages are read", got)
 	}
 }
+
+func TestPullRequestCostWhenAListSpansPages(t *testing.T) {
+	fake := pagedOpenFake(t)
+	for id := range 5 {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
+	}
+	fake.statuses = []map[string]any{statusFixture("ci/ok", "success")}
+	fake.reviews = []map[string]any{reviewPayload(1, "APPROVED", "2026-11-20T09:00:00Z")}
+	revision := readFirstRevision(t, fake)
+	fake.resetCalls()
+	if _, err := readPullSince(t, fake, revision); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fake.snapshot()); got != 7 {
+		t.Errorf("requests = %d, want 7: one 304 and one full read of the pull request, 3 check-run pages, 1 status, 1 review", got)
+	}
+	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 3, endpointStatuses: 1, endpointReviews: 1} {
+		if got := len(fake.callsTo(kind)); got != want {
+			t.Errorf("endpoint %d requests = %d, want %d", kind, got, want)
+		}
+	}
+}
