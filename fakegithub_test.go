@@ -174,7 +174,7 @@ func (g *fakeGitHub) respond(w http.ResponseWriter, r *http.Request, body any, l
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 	w.Header().Set(headerETag, etag)
 	notModified := r.Header.Get(headerIfNoneMatch) == etag
-	if link != "" && !(notModified && g.omitLink) {
+	if link != "" && (!notModified || !g.omitLink) {
 		w.Header().Set(headerLink, link)
 	}
 	if notModified {

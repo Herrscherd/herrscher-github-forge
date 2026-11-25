@@ -101,7 +101,7 @@ func parseHead(text string) (contracts.CommitSHA, error) {
 }
 
 func (s listingState) encode() string {
-	return strings.Join([]string{url.QueryEscape(s.firstETag), strconv.Itoa(s.last)}, ",")
+	return url.QueryEscape(s.firstETag) + "," + strconv.Itoa(s.last)
 }
 
 func parseListing(text string) (listingState, error) {

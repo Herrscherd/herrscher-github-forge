@@ -47,7 +47,13 @@ func TestChecksMapsCheckRunsAndStatuses(t *testing.T) {
 	if page.Next != "" || len(page.Items) != 7 {
 		t.Fatalf("got %d checks, next %q; want 7 and no next", len(page.Items), page.Next)
 	}
-	got := page.Items[0]
+	assertCheckRunsMapped(t, page.Items[:4])
+	assertStatusesMapped(t, page.Items[4:])
+}
+
+func assertCheckRunsMapped(t *testing.T, items []contracts.Check) {
+	t.Helper()
+	got := items[0]
 	if got.Status != contracts.CheckCompleted || got.Conclusion != contracts.ConclusionSuccess {
 		t.Errorf("test check = %v %v", got.Status, got.Conclusion)
 	}
@@ -57,28 +63,32 @@ func TestChecksMapsCheckRunsAndStatuses(t *testing.T) {
 	if got.Commit != mustCommit(t) || got.URL != "https://x/1" {
 		t.Errorf("test check commit or URL = %s %q", got.Commit, got.URL)
 	}
-	lint := page.Items[1]
+	lint := items[1]
 	if lint.Status != contracts.CheckInProgress || lint.Job != nil {
 		t.Errorf("running non-Actions check = %v job %v", lint.Status, lint.Job)
 	}
 	if _, concluded := lint.Concluded(); concluded {
 		t.Error("a running check reports a conclusion")
 	}
-	if page.Items[2].Status != contracts.CheckQueued {
-		t.Errorf("waiting check status = %v, want queued", page.Items[2].Status)
+	if items[2].Status != contracts.CheckQueued {
+		t.Errorf("waiting check status = %v, want queued", items[2].Status)
 	}
-	if got := page.Items[3].Conclusion; got != contracts.ConclusionOther {
+	if got := items[3].Conclusion; got != contracts.ConclusionOther {
 		t.Errorf("unknown completed conclusion = %v, want other", got)
 	}
-	legacy := page.Items[4]
+}
+
+func assertStatusesMapped(t *testing.T, items []contracts.Check) {
+	t.Helper()
+	legacy := items[0]
 	if legacy.Name != "ci/legacy" || legacy.Status != contracts.CheckCompleted || legacy.Conclusion != contracts.ConclusionFailure {
 		t.Errorf("error status = %+v", legacy)
 	}
-	if page.Items[5].Status != contracts.CheckInProgress {
-		t.Errorf("pending status = %v, want in progress", page.Items[5].Status)
+	if items[1].Status != contracts.CheckInProgress {
+		t.Errorf("pending status = %v, want in progress", items[1].Status)
 	}
-	if page.Items[6].Conclusion != contracts.ConclusionSuccess {
-		t.Errorf("success status conclusion = %v", page.Items[6].Conclusion)
+	if items[2].Conclusion != contracts.ConclusionSuccess {
+		t.Errorf("success status conclusion = %v", items[2].Conclusion)
 	}
 }
 

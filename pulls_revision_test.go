@@ -300,7 +300,7 @@ func TestPullRequestCostWhenAListSpansPages(t *testing.T) {
 	if got := len(fake.snapshot()); got != 7 {
 		t.Errorf("requests = %d, want 7: one 304 and one full read of the pull request, 3 check-run pages, 1 status, 1 review", got)
 	}
-	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 3, endpointStatuses: 1, endpointReviews: 1} {
+	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 3, endpointStatuses: 1, endpointReviews: 1, endpointMerge: 0} {
 		if got := len(fake.callsTo(kind)); got != want {
 			t.Errorf("endpoint %d requests = %d, want %d", kind, got, want)
 		}

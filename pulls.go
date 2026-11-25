@@ -195,7 +195,6 @@ func (f *forge) assemble(ctx context.Context, ref contracts.PullRequestRef, read
 	return pull, nil
 }
 
-// OpenPullRequest opens a pull request. The pull request it returns has an empty Revision, so the first read after opening is a full read.
 func (f *forge) OpenPullRequest(ctx context.Context, draft contracts.PullRequestDraft) (contracts.PullRequest, error) {
 	if err := f.checkRepo(draft.Repo); err != nil {
 		return contracts.PullRequest{}, err
