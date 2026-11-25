@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type endpoint int
@@ -27,6 +28,7 @@ type fakeCall struct {
 	sha         string
 	page        int
 	conditional bool
+	notModified bool
 }
 
 type fakeGitHub struct {
@@ -41,6 +43,7 @@ type fakeGitHub struct {
 	reviews         []map[string]any
 	fail            map[endpoint]int
 	mergeCode       int
+	billed          int
 	calls           []fakeCall
 }
 
@@ -194,6 +197,13 @@ func (g *fakeGitHub) respond(w http.ResponseWriter, r *http.Request, body any, l
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 	w.Header().Set(headerETag, etag)
 	notModified := r.Header.Get(headerIfNoneMatch) == etag
+	g.calls[len(g.calls)-1].notModified = notModified
+	if !notModified {
+		g.billed++
+	}
+	w.Header().Set(headerRateLimit, "5000")
+	w.Header().Set(headerRateRemaining, strconv.Itoa(5000-g.billed))
+	w.Header().Set(headerRateReset, strconv.FormatInt(testNow().Add(time.Hour).Unix(), 10))
 	if link != "" && (!notModified || !g.omitLink) {
 		w.Header().Set(headerLink, link)
 	}

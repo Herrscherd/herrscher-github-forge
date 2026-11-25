@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
@@ -355,5 +357,69 @@ func TestPullRequestCostWhenAListSpansPages(t *testing.T) {
 		if got := len(fake.callsTo(kind)); got != want {
 			t.Errorf("endpoint %d requests = %d, want %d", kind, got, want)
 		}
+	}
+}
+
+func quotaRemaining(f *forge) int {
+	f.quota.mu.Lock()
+	defer f.quota.mu.Unlock()
+	return f.quota.remaining
+}
+
+func TestPullRequestReadsFullyWhenRevisionHasNoHead(t *testing.T) {
+	fake := openFake(t)
+	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+	revision := readFirstRevision(t, fake)
+	headless := regexp.MustCompile("head=[0-9a-f]+").ReplaceAllString(string(revision), "head=")
+	if headless == string(revision) {
+		t.Fatal("the revision holds no head to remove")
+	}
+	var conditional atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(headerIfNoneMatch) != "" {
+			conditional.Add(1)
+		}
+		fake.ServeHTTP(w, r)
+	})
+	f, _ := newTestForge(t, handler)
+	_, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), contracts.Revision(headless))
+	if errors.Is(err, contracts.ErrForgeNotModified) {
+		t.Fatal("err = ErrForgeNotModified, want a full read: a revision without a head cannot prove the checks unchanged")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := conditional.Load(); got != 1 {
+		t.Errorf("conditional requests = %d, want 1: only the pull request carries its validator, no listing is probed", got)
+	}
+}
+
+func TestPullRequestAtRestCostsFourNotModifiedProbesAndNoQuota(t *testing.T) {
+	fake := openFake(t)
+	fake.omitLink = true
+	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+	f := newFakeForge(t, fake)
+	ref := mustPullRef(t, testRepo(t))
+	first, err := f.PullRequest(t.Context(), ref, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := quotaRemaining(f)
+	fake.resetCalls()
+	_, err = f.PullRequest(t.Context(), ref, first.Revision)
+	if !errors.Is(err, contracts.ErrForgeNotModified) {
+		t.Fatalf("err = %v, want ErrForgeNotModified for a single-page listing that answers 304 without Link", err)
+	}
+	calls := fake.snapshot()
+	if len(calls) != 4 {
+		t.Fatalf("requests = %d, want 4 probes", len(calls))
+	}
+	for _, call := range calls {
+		if !call.notModified {
+			t.Errorf("endpoint %d answered 200, want 304", call.endpoint)
+		}
+	}
+	if after := quotaRemaining(f); after != before {
+		t.Errorf("quota remaining = %d, want %d: a 304 costs no quota", after, before)
 	}
 }
