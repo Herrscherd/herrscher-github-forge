@@ -68,23 +68,22 @@ func mergeStateOf(mergeable string) contracts.MergeState {
 	return contracts.MergeStateUnknown
 }
 
-func (p pullWire) toPullRequest(ref contracts.PullRequestRef, revision contracts.Revision) (contracts.PullRequest, error) {
+func (p pullWire) toPullRequest(ref contracts.PullRequestRef) (contracts.PullRequest, error) {
 	head, err := contracts.ParseCommitSHA(p.Head.SHA)
 	if err != nil {
 		return contracts.PullRequest{}, fmt.Errorf("pull request head: %w", err)
 	}
 	return contracts.PullRequest{
-		Ref:      ref,
-		Title:    p.Title,
-		URL:      p.HTMLURL,
-		Head:     p.Head.Ref,
-		Base:     p.Base.Ref,
-		HeadSHA:  head,
-		State:    p.pullState(),
-		Draft:    p.Draft,
-		Merge:    mergeStateOf(p.MergeableState),
-		Author:   p.User.forgeActor(p.AuthorAssociation),
-		Revision: revision,
+		Ref:     ref,
+		Title:   p.Title,
+		URL:     p.HTMLURL,
+		Head:    p.Head.Ref,
+		Base:    p.Base.Ref,
+		HeadSHA: head,
+		State:   p.pullState(),
+		Draft:   p.Draft,
+		Merge:   mergeStateOf(p.MergeableState),
+		Author:  p.User.forgeActor(p.AuthorAssociation),
 	}, nil
 }
 
@@ -93,28 +92,107 @@ func (f *forge) pullURL(ref contracts.PullRequestRef, elements ...string) *url.U
 	return f.repoURL(ref.Repo(), nil, path...)
 }
 
+type pullRead struct {
+	wire        pullWire
+	etag        string
+	notModified bool
+}
+
+func (f *forge) fetchPull(ctx context.Context, ref contracts.PullRequestRef, ifNoneMatch string) (pullRead, error) {
+	spec := request{method: http.MethodGet, target: f.pullURL(ref), ifNoneMatch: ifNoneMatch}
+	var read pullRead
+	err := f.exchange(ctx, spec, func(_ contracts.ForgeToken, resp *http.Response) error {
+		read.etag = resp.Header.Get(headerETag)
+		if resp.StatusCode == http.StatusNotModified {
+			read.notModified = true
+			return nil
+		}
+		return decodeJSON(resp.Body, &read.wire)
+	})
+	return read, err
+}
+
 func (f *forge) PullRequest(ctx context.Context, ref contracts.PullRequestRef, since contracts.Revision) (contracts.PullRequest, error) {
 	if err := f.checkRepo(ref.Repo()); err != nil {
 		return contracts.PullRequest{}, err
 	}
-	spec := request{method: http.MethodGet, target: f.pullURL(ref), ifNoneMatch: string(since)}
-	var pull contracts.PullRequest
-	err := f.exchange(ctx, spec, func(_ contracts.ForgeToken, resp *http.Response) error {
-		if resp.StatusCode == http.StatusNotModified {
-			return contracts.ErrForgeNotModified
+	prev, err := parseRevision(since)
+	if err != nil {
+		return f.fullPull(ctx, ref)
+	}
+	read, err := f.fetchPull(ctx, ref, prev.pull)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	if !read.notModified {
+		return f.assemble(ctx, ref, read)
+	}
+	unchanged, err := f.unchangedSince(ctx, ref, prev)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	if unchanged {
+		return contracts.PullRequest{}, contracts.ErrForgeNotModified
+	}
+	return f.fullPull(ctx, ref)
+}
+
+func (f *forge) fullPull(ctx context.Context, ref contracts.PullRequestRef) (contracts.PullRequest, error) {
+	read, err := f.fetchPull(ctx, ref, "")
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	return f.assemble(ctx, ref, read)
+}
+
+func (f *forge) unchangedSince(ctx context.Context, ref contracts.PullRequestRef, prev revisionState) (bool, error) {
+	if prev.head == (contracts.CommitSHA{}) {
+		return false, nil
+	}
+	repo := ref.Repo()
+	probes := []struct {
+		listing func(int) *url.URL
+		state   listingState
+	}{
+		{f.checkRunsListing(repo, prev.head), prev.checks},
+		{f.statusListing(repo, prev.head), prev.status},
+		{f.reviewsListing(ref), prev.reviews},
+	}
+	for _, probe := range probes {
+		unchanged, err := f.listingUnchanged(ctx, probe.listing, probe.state)
+		if degraded(err) {
+			return false, nil
 		}
-		var wire pullWire
-		if err := decodeJSON(resp.Body, &wire); err != nil {
-			return err
+		if err != nil || !unchanged {
+			return false, err
 		}
-		converted, err := wire.toPullRequest(ref, contracts.Revision(resp.Header.Get(headerETag)))
-		if err != nil {
-			return err
-		}
-		pull = converted
-		return nil
-	})
-	return pull, err
+	}
+	return true, nil
+}
+
+func (f *forge) assemble(ctx context.Context, ref contracts.PullRequestRef, read pullRead) (contracts.PullRequest, error) {
+	pull, err := read.wire.toPullRequest(ref)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	checks, err := f.readHeadChecks(ctx, ref.Repo(), pull.HeadSHA)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	latest, reviews, err := f.readReviews(ctx, ref)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	pull.Checks = checks.state
+	pull.LatestReview = latest
+	pull.Revision = revisionState{
+		pull:    read.etag,
+		head:    pull.HeadSHA,
+		checks:  checks.runs,
+		status:  checks.statuses,
+		reviews: reviews,
+	}.revision()
+	return pull, nil
 }
 
 func (f *forge) OpenPullRequest(ctx context.Context, draft contracts.PullRequestDraft) (contracts.PullRequest, error) {
@@ -136,7 +214,7 @@ func (f *forge) OpenPullRequest(ctx context.Context, draft contracts.PullRequest
 		if err != nil {
 			return fmt.Errorf("opened pull request: %w", err)
 		}
-		converted, err := wire.toPullRequest(ref, contracts.Revision(resp.Header.Get(headerETag)))
+		converted, err := wire.toPullRequest(ref)
 		if err != nil {
 			return err
 		}
@@ -179,7 +257,11 @@ func (f *forge) MergePullRequest(ctx context.Context, ref contracts.PullRequestR
 	if err != nil || !refused {
 		return err
 	}
-	pull, err := f.PullRequest(ctx, ref, "")
+	read, err := f.fetchPull(ctx, ref, "")
+	if err != nil {
+		return err
+	}
+	pull, err := read.wire.toPullRequest(ref)
 	if err != nil {
 		return err
 	}

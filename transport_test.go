@@ -331,3 +331,28 @@ func TestSameOriginRedirectKeepsAuthorization(t *testing.T) {
 		t.Errorf("Authorization on the same origin = %q, want it kept", got)
 	}
 }
+
+func TestGraphQLIsNotRefusedByExhaustedRESTQuota(t *testing.T) {
+	seen := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /graphql", func(w http.ResponseWriter, _ *http.Request) {
+		seen = true
+		graphQLData(t, w, make(map[string]any))
+	})
+	mux.HandleFunc("GET /repos/acme/widgets/pulls/5", func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("REST request sent although the core quota is exhausted")
+	})
+	f, _ := newTestForge(t, mux)
+	f.quota.observe(rateHeader(0, testNow().Add(time.Hour)))
+	var out map[string]any
+	if err := f.graphQL(t.Context(), "query{viewer{login}}", nil, &out); err != nil {
+		t.Fatalf("GraphQL err = %v, want nil", err)
+	}
+	if !seen {
+		t.Error("GraphQL request was not sent")
+	}
+	var limited *contracts.ForgeRateLimitedError
+	if _, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), ""); !errors.As(err, &limited) {
+		t.Fatalf("REST err = %v, want ForgeRateLimitedError", err)
+	}
+}

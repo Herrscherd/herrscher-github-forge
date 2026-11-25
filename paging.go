@@ -39,22 +39,56 @@ func pageNumber(cursor contracts.PageCursor) (int, error) {
 	return number, nil
 }
 
-func nextPageCursor(link string) (contracts.PageCursor, error) {
+type pageLinks struct {
+	next int
+	last int
+}
+
+func parsePageLinks(link string) (pageLinks, error) {
+	var links pageLinks
 	for _, part := range strings.Split(link, ",") {
 		target, relations, found := strings.Cut(part, ";")
-		if !found || !strings.Contains(relations, `rel="next"`) {
+		if !found {
 			continue
 		}
-		next, err := url.Parse(strings.Trim(strings.TrimSpace(target), "<>"))
-		if err != nil {
-			return "", fmt.Errorf("link header next target: %w", errUnexpectedValue)
+		switch {
+		case strings.Contains(relations, `rel="next"`):
+			number, err := linkPageNumber(target)
+			if err != nil {
+				return pageLinks{}, err
+			}
+			links.next = number
+		case strings.Contains(relations, `rel="last"`):
+			number, err := linkPageNumber(target)
+			if err != nil {
+				return pageLinks{}, err
+			}
+			links.last = number
 		}
-		page := next.Query().Get("page")
-		number, err := strconv.Atoi(page)
-		if err != nil || number < 1 {
-			return "", fmt.Errorf("link header next page %q: %w", page, errUnexpectedValue)
-		}
-		return contracts.PageCursor(page), nil
 	}
-	return "", nil
+	return links, nil
+}
+
+func linkPageNumber(target string) (int, error) {
+	link, err := url.Parse(strings.Trim(strings.TrimSpace(target), "<>"))
+	if err != nil {
+		return 0, fmt.Errorf("link header target: %w", errUnexpectedValue)
+	}
+	page := link.Query().Get("page")
+	number, err := strconv.Atoi(page)
+	if err != nil || number < 1 {
+		return 0, fmt.Errorf("link header page %q: %w", page, errUnexpectedValue)
+	}
+	return number, nil
+}
+
+func nextPageCursor(link string) (contracts.PageCursor, error) {
+	links, err := parsePageLinks(link)
+	if err != nil {
+		return "", err
+	}
+	if links.next == 0 {
+		return "", nil
+	}
+	return contracts.PageCursor(strconv.Itoa(links.next)), nil
 }

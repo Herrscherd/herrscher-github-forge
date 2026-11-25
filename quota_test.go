@@ -226,3 +226,24 @@ func TestParseCount(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotaIgnoresGraphQLResponses(t *testing.T) {
+	var q quota
+	header := rateHeader(1, testNow().Add(time.Hour))
+	header.Set(headerRateResource, "graphql")
+	q.observe(header)
+	if err := q.refusal(testNow()); err != nil {
+		t.Errorf("refusal after a GraphQL response = %v, want nil: the GraphQL bucket is not the REST core bucket", err)
+	}
+}
+
+func TestQuotaObservesCoreResponses(t *testing.T) {
+	var q quota
+	header := rateHeader(1, testNow().Add(time.Hour))
+	header.Set(headerRateResource, "core")
+	q.observe(header)
+	var limited *contracts.ForgeRateLimitedError
+	if err := q.refusal(testNow()); !errors.As(err, &limited) {
+		t.Fatalf("refusal = %v, want ForgeRateLimitedError from a core response", err)
+	}
+}

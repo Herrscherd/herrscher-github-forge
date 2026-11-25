@@ -213,3 +213,15 @@ func (f *forge) ReplyToThread(ctx context.Context, thread contracts.ThreadRef, b
 	var ignored struct{}
 	return f.graphQL(ctx, replyMutation, variables, &ignored)
 }
+
+type pageInfoWire struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
+}
+
+func (p pageInfoWire) cursor() contracts.PageCursor {
+	if !p.HasNextPage {
+		return ""
+	}
+	return contracts.PageCursor(p.EndCursor)
+}

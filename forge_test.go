@@ -127,3 +127,34 @@ func writeBody(tb testing.TB, w io.Writer, body string) {
 }
 
 const testPullNumber = 5
+
+const testCommit = "0123456789abcdef0123456789abcdef01234567"
+
+func mustCommit(tb testing.TB) contracts.CommitSHA {
+	tb.Helper()
+	commit, err := contracts.ParseCommitSHA(testCommit)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return commit
+}
+
+type sentGraphQL struct {
+	Query     string         `json:"query"`
+	Variables map[string]any `json:"variables"`
+}
+
+func graphQLHandler(t *testing.T, seen *sentGraphQL, data json.RawMessage) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" {
+			t.Errorf("GraphQL path = %q", r.URL.Path)
+		}
+		if seen != nil {
+			if err := json.NewDecoder(r.Body).Decode(seen); err != nil {
+				t.Fatal(err)
+			}
+		}
+		graphQLData(t, w, data)
+	})
+}

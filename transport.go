@@ -39,13 +39,16 @@ type request struct {
 	body        []byte
 	ifNoneMatch string
 	accepted    []int
+	graphQL     bool
 }
 
 type responder func(token contracts.ForgeToken, resp *http.Response) error
 
 func (f *forge) exchange(ctx context.Context, spec request, handle responder) error {
-	if err := f.quota.refusal(f.now()); err != nil {
-		return err
+	if !spec.graphQL {
+		if err := f.quota.refusal(f.now()); err != nil {
+			return err
+		}
 	}
 	if err := f.acquire(ctx); err != nil {
 		return err
@@ -215,7 +218,7 @@ func (f *forge) graphQL(ctx context.Context, query string, variables map[string]
 	if err != nil {
 		return err
 	}
-	spec := request{method: http.MethodPost, target: f.api.graphql, body: payload}
+	spec := request{method: http.MethodPost, target: f.api.graphql, body: payload, graphQL: true}
 	return f.exchange(ctx, spec, func(_ contracts.ForgeToken, resp *http.Response) error {
 		var envelope graphQLResponse
 		if err := decodeJSON(resp.Body, &envelope); err != nil {
