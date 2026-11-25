@@ -97,6 +97,24 @@ func (f *forge) PullRequest(ctx context.Context, ref contracts.PullRequestRef, s
 	if err := f.checkRepo(ref.Repo()); err != nil {
 		return contracts.PullRequest{}, err
 	}
+	pull, err := f.readPullRequest(ctx, ref, since)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	checks, err := f.headChecks(ctx, ref.Repo(), pull.HeadSHA)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	latest, err := f.latestReview(ctx, ref)
+	if err != nil {
+		return contracts.PullRequest{}, err
+	}
+	pull.Checks = checks
+	pull.LatestReview = latest
+	return pull, nil
+}
+
+func (f *forge) readPullRequest(ctx context.Context, ref contracts.PullRequestRef, since contracts.Revision) (contracts.PullRequest, error) {
 	spec := request{method: http.MethodGet, target: f.pullURL(ref), ifNoneMatch: string(since)}
 	var pull contracts.PullRequest
 	err := f.exchange(ctx, spec, func(_ contracts.ForgeToken, resp *http.Response) error {
@@ -179,7 +197,7 @@ func (f *forge) MergePullRequest(ctx context.Context, ref contracts.PullRequestR
 	if err != nil || !refused {
 		return err
 	}
-	pull, err := f.PullRequest(ctx, ref, "")
+	pull, err := f.readPullRequest(ctx, ref, "")
 	if err != nil {
 		return err
 	}

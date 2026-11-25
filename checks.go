@@ -11,6 +11,7 @@ import (
 const (
 	actionsAppSlug = "github-actions"
 	maxQuotedValue = 64
+	checksPageSize = 100
 )
 
 const checksQuery = `query($owner: String!, $name: String!, $oid: GitObjectID!, $first: Int!, $after: String) {
@@ -180,6 +181,22 @@ func (c contextsWire) toPage(repo contracts.ForgeRepoRef, commit contracts.Commi
 		items = append(items, check)
 	}
 	return contracts.Page[contracts.Check]{Items: items, Next: c.PageInfo.cursor()}, nil
+}
+
+func (f *forge) headChecks(ctx context.Context, repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.ChecksState, error) {
+	var checks []contracts.Check
+	var cursor contracts.PageCursor
+	for {
+		page, err := f.Checks(ctx, repo, commit, contracts.PageRequest{Cursor: cursor, Limit: checksPageSize})
+		if err != nil {
+			return contracts.ChecksUnknown, err
+		}
+		checks = append(checks, page.Items...)
+		if page.Next == "" {
+			return contracts.SummarizeChecks(checks), nil
+		}
+		cursor = page.Next
+	}
 }
 
 func (f *forge) Checks(ctx context.Context, repo contracts.ForgeRepoRef, commit contracts.CommitSHA, page contracts.PageRequest) (contracts.Page[contracts.Check], error) {

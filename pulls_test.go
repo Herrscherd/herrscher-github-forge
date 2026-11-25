@@ -37,6 +37,8 @@ func pullsMux(t *testing.T, pull map[string]any, etag string) *http.ServeMux {
 		}
 		writeJSON(t, w, http.StatusOK, pull)
 	})
+	mux.Handle("POST /graphql", noChecks(t))
+	mux.HandleFunc("GET /repos/acme/widgets/pulls/5/reviews", noReviews(t))
 	return mux
 }
 
@@ -121,6 +123,8 @@ func TestPullRequestWithoutSinceSendsNoConditionalHeader(t *testing.T) {
 		}
 		writeJSON(t, w, http.StatusOK, pullPayload(5, "open", "", "clean"))
 	})
+	mux.Handle("POST /graphql", noChecks(t))
+	mux.HandleFunc("GET /repos/acme/widgets/pulls/5/reviews", noReviews(t))
 	f, _ := newTestForge(t, mux)
 	if _, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), ""); err != nil {
 		t.Fatal(err)
