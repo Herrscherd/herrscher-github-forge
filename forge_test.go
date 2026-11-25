@@ -146,7 +146,6 @@ type sentGraphQL struct {
 
 func graphQLHandler(t *testing.T, seen *sentGraphQL, data json.RawMessage) http.Handler {
 	t.Helper()
-	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/graphql" {
 			t.Errorf("GraphQL path = %q", r.URL.Path)
