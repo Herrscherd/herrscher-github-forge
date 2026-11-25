@@ -252,15 +252,33 @@ func TestPullRequestPropagatesReviewsReadError(t *testing.T) {
 	}
 }
 
-func TestPullRequestRefusesMoreThanTwentyReviewPages(t *testing.T) {
+func TestPullRequestDegradesReviewsOverTwentyPages(t *testing.T) {
 	fake := openFake(t)
 	fake.pageSize = 1
 	for id := range maxListingPages + 1 {
 		fake.reviews = append(fake.reviews, reviewPayload(int64(id+1), "COMMENTED", "2026-11-20T09:00:00Z"))
 	}
-	_, err := readPullWith(t, fake)
-	if !errors.Is(err, errTooManyPages) {
-		t.Fatalf("err = %v, want errTooManyPages", err)
+	got, err := readPullWith(t, fake)
+	if err != nil {
+		t.Fatalf("err = %v, want the pull request with an empty LatestReview", err)
+	}
+	if got.LatestReview != "" {
+		t.Errorf("LatestReview = %q, want empty: the reviews are not read in full", got.LatestReview)
+	}
+}
+
+func TestPullRequestDegradesChecksOverTwentyPages(t *testing.T) {
+	fake := openFake(t)
+	fake.pageSize = 1
+	for id := range maxListingPages + 1 {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(int64(id+1), "job", "completed", "success"))
+	}
+	got, err := readPullWith(t, fake)
+	if err != nil {
+		t.Fatalf("err = %v, want the pull request with ChecksUnknown", err)
+	}
+	if got.Checks != contracts.ChecksUnknown {
+		t.Errorf("checks = %v, want %v: the check runs are not read in full", got.Checks, contracts.ChecksUnknown)
 	}
 }
 

@@ -95,5 +95,5 @@ func (f *forge) pagedRepoURL(repo contracts.ForgeRepoRef, query url.Values, numb
 }
 
 func degraded(err error) bool {
-	return errors.Is(err, contracts.ErrForgeForbidden) || errors.Is(err, contracts.ErrForgeNotFound)
+	return errors.Is(err, contracts.ErrForgeForbidden) || errors.Is(err, contracts.ErrForgeNotFound) || errors.Is(err, errTooManyPages)
 }
