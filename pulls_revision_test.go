@@ -111,7 +111,11 @@ func TestPullRequestRereadsWhenHeadSHAChanges(t *testing.T) {
 	if got.HeadSHA.String() != otherHeadSHA {
 		t.Errorf("head SHA = %s, want %s", got.HeadSHA, otherHeadSHA)
 	}
-	for _, call := range fake.callsTo(endpointCheckRuns) {
+	checkRunCalls := fake.callsTo(endpointCheckRuns)
+	if len(checkRunCalls) == 0 {
+		t.Fatal("no check-run request after the head changed, want the checks of the new head to be read")
+	}
+	for _, call := range checkRunCalls {
 		if call.sha != otherHeadSHA {
 			t.Errorf("check runs read for %s, want %s", call.sha, otherHeadSHA)
 		}
