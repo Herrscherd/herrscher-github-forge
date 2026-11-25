@@ -3,7 +3,10 @@ package github
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/url"
 	"strconv"
+	"strings"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -11,7 +14,6 @@ import (
 const (
 	actionsAppSlug = "github-actions"
 	maxQuotedValue = 64
-	checksPageSize = 100
 )
 
 const checksQuery = `query($owner: String!, $name: String!, $oid: GitObjectID!, $first: Int!, $after: String) {
@@ -89,35 +91,51 @@ func (n checkNodeWire) isActionsJob() bool {
 func (n checkNodeWire) toCheck(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Check, error) {
 	switch n.Typename {
 	case "CheckRun":
-		return n.checkRun(repo, commit)
+		return checkRunCheck(repo, commit, checkRunFacts{
+			name:        n.Name,
+			status:      n.Status,
+			conclusion:  n.Conclusion,
+			url:         n.DetailsURL,
+			jobID:       n.DatabaseID,
+			fromActions: n.isActionsJob(),
+		})
 	case "StatusContext":
-		return n.statusContext(commit)
+		return statusCheck(commit, n.Context, n.State, n.TargetURL)
 	}
 	return contracts.Check{}, fmt.Errorf("check kind %s: %w", quotedValue(n.Typename), errUnexpectedValue)
 }
 
-func (n checkNodeWire) checkRun(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Check, error) {
-	status, err := checkRunStatus(n.Status)
+type checkRunFacts struct {
+	name        string
+	status      string
+	conclusion  string
+	url         string
+	jobID       int64
+	fromActions bool
+}
+
+func checkRunCheck(repo contracts.ForgeRepoRef, commit contracts.CommitSHA, facts checkRunFacts) (contracts.Check, error) {
+	status, err := checkRunStatus(facts.status)
 	if err != nil {
-		return contracts.Check{}, fmt.Errorf("check run %q: %w", n.Name, err)
+		return contracts.Check{}, fmt.Errorf("check run %q: %w", facts.name, err)
 	}
-	check := contracts.Check{Name: n.Name, Commit: commit, Status: status, URL: n.DetailsURL}
+	check := contracts.Check{Name: facts.name, Commit: commit, Status: status, URL: facts.url}
 	if check.Status == contracts.CheckCompleted {
-		check.Conclusion = checkRunConclusion(n.Conclusion)
+		check.Conclusion = checkRunConclusion(facts.conclusion)
 	}
-	if n.isActionsJob() {
-		job, err := contracts.NewJobRef(repo, n.DatabaseID)
+	if facts.fromActions {
+		job, err := contracts.NewJobRef(repo, facts.jobID)
 		if err != nil {
-			return contracts.Check{}, fmt.Errorf("check run %q: %w", n.Name, err)
+			return contracts.Check{}, fmt.Errorf("check run %q: %w", facts.name, err)
 		}
 		check.Job = &job
 	}
 	return check, nil
 }
 
-func (n checkNodeWire) statusContext(commit contracts.CommitSHA) (contracts.Check, error) {
-	check := contracts.Check{Name: n.Context, Commit: commit, URL: n.TargetURL}
-	switch n.State {
+func statusCheck(commit contracts.CommitSHA, name, state, targetURL string) (contracts.Check, error) {
+	check := contracts.Check{Name: name, Commit: commit, URL: targetURL}
+	switch state {
 	case "SUCCESS":
 		check.Status, check.Conclusion = contracts.CheckCompleted, contracts.ConclusionSuccess
 	case "FAILURE", "ERROR":
@@ -127,7 +145,7 @@ func (n checkNodeWire) statusContext(commit contracts.CommitSHA) (contracts.Chec
 	case "EXPECTED":
 		check.Status = contracts.CheckQueued
 	default:
-		return contracts.Check{}, fmt.Errorf("status context %q state %s: %w", n.Context, quotedValue(n.State), errUnexpectedValue)
+		return contracts.Check{}, fmt.Errorf("status context %q state %s: %w", name, quotedValue(state), errUnexpectedValue)
 	}
 	return check, nil
 }
@@ -183,22 +201,6 @@ func (c contextsWire) toPage(repo contracts.ForgeRepoRef, commit contracts.Commi
 	return contracts.Page[contracts.Check]{Items: items, Next: c.PageInfo.cursor()}, nil
 }
 
-func (f *forge) headChecks(ctx context.Context, repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.ChecksState, error) {
-	var checks []contracts.Check
-	var cursor contracts.PageCursor
-	for {
-		page, err := f.Checks(ctx, repo, commit, contracts.PageRequest{Cursor: cursor, Limit: checksPageSize})
-		if err != nil {
-			return contracts.ChecksUnknown, err
-		}
-		checks = append(checks, page.Items...)
-		if page.Next == "" {
-			return contracts.SummarizeChecks(checks), nil
-		}
-		cursor = page.Next
-	}
-}
-
 func (f *forge) Checks(ctx context.Context, repo contracts.ForgeRepoRef, commit contracts.CommitSHA, page contracts.PageRequest) (contracts.Page[contracts.Check], error) {
 	if err := f.checkRepo(repo); err != nil {
 		return contracts.Page[contracts.Check]{}, err
@@ -229,4 +231,121 @@ func (f *forge) Checks(ctx context.Context, repo contracts.ForgeRepoRef, commit 
 		return contracts.Page[contracts.Check]{}, nil
 	}
 	return rollup.Contexts.toPage(repo, commit)
+}
+
+type checkRunsWire struct {
+	CheckRuns []checkRunWire `json:"check_runs"`
+}
+
+type checkRunWire struct {
+	ID         int64    `json:"id"`
+	Name       string   `json:"name"`
+	Status     string   `json:"status"`
+	Conclusion string   `json:"conclusion"`
+	DetailsURL string   `json:"details_url"`
+	App        *appWire `json:"app"`
+}
+
+type appWire struct {
+	Slug string `json:"slug"`
+}
+
+type combinedStatusWire struct {
+	Statuses []statusWire `json:"statuses"`
+}
+
+type statusWire struct {
+	Context   string `json:"context"`
+	State     string `json:"state"`
+	TargetURL string `json:"target_url"`
+}
+
+func (r checkRunWire) toCheck(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Check, error) {
+	return checkRunCheck(repo, commit, checkRunFacts{
+		name:        r.Name,
+		status:      strings.ToUpper(r.Status),
+		conclusion:  strings.ToUpper(r.Conclusion),
+		url:         r.DetailsURL,
+		jobID:       r.ID,
+		fromActions: r.App != nil && r.App.Slug == actionsAppSlug,
+	})
+}
+
+func checkRunChecks(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) func(io.Reader) ([]contracts.Check, error) {
+	return func(body io.Reader) ([]contracts.Check, error) {
+		var wire checkRunsWire
+		if err := decodeJSON(body, &wire); err != nil {
+			return nil, err
+		}
+		checks := make([]contracts.Check, 0, len(wire.CheckRuns))
+		for _, run := range wire.CheckRuns {
+			check, err := run.toCheck(repo, commit)
+			if err != nil {
+				return nil, err
+			}
+			checks = append(checks, check)
+		}
+		return checks, nil
+	}
+}
+
+func statusChecks(commit contracts.CommitSHA) func(io.Reader) ([]contracts.Check, error) {
+	return func(body io.Reader) ([]contracts.Check, error) {
+		var wire combinedStatusWire
+		if err := decodeJSON(body, &wire); err != nil {
+			return nil, err
+		}
+		checks := make([]contracts.Check, 0, len(wire.Statuses))
+		for _, status := range wire.Statuses {
+			check, err := statusCheck(commit, status.Context, strings.ToUpper(status.State), status.TargetURL)
+			if err != nil {
+				return nil, err
+			}
+			checks = append(checks, check)
+		}
+		return checks, nil
+	}
+}
+
+func (f *forge) checkRunsListing(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) func(int) *url.URL {
+	return func(number int) *url.URL {
+		return f.pagedRepoURL(repo, url.Values{"filter": {"latest"}}, number, "commits", commit.String(), "check-runs")
+	}
+}
+
+func (f *forge) statusListing(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) func(int) *url.URL {
+	return func(number int) *url.URL {
+		return f.pagedRepoURL(repo, url.Values{}, number, "commits", commit.String(), "status")
+	}
+}
+
+type headChecks struct {
+	state    contracts.ChecksState
+	runs     listingState
+	statuses listingState
+}
+
+func (f *forge) readHeadChecks(ctx context.Context, repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (headChecks, error) {
+	runs, runState, runErr := readListing(ctx, f, f.checkRunsListing(repo, commit), checkRunChecks(repo, commit))
+	statuses, statusState, statusErr := readListing(ctx, f, f.statusListing(repo, commit), statusChecks(commit))
+	if err := firstUnreadable(runErr, statusErr); err != nil {
+		return headChecks{}, err
+	}
+	if degraded(runErr) || degraded(statusErr) {
+		return headChecks{state: contracts.ChecksUnknown, runs: runState, statuses: statusState}, nil
+	}
+	return headChecks{
+		state:    contracts.SummarizeChecks(append(runs, statuses...)),
+		runs:     runState,
+		statuses: statusState,
+	}, nil
+}
+
+func firstUnreadable(errs ...error) error {
+	for _, err := range errs {
+		if err != nil && !degraded(err) {
+			return err
+		}
+	}
+	return nil
 }

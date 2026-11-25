@@ -28,6 +28,8 @@ var (
 	errMissingCommit       = errors.New("commit is the zero value and names no commit")
 	errTooManyCommentPages = errors.New("review thread has more comment pages than the plugin reads")
 	errRefusedRepo         = errors.New("repository is refused by the contracts port and left out of the listing")
+	errTooManyPages        = errors.New("listing has more pages than the plugin reads")
+	errUnreadableRevision  = errors.New("revision is not one this plugin wrote")
 )
 
 type graphQLError struct {
