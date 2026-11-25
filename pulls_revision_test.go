@@ -312,8 +312,12 @@ func TestPullRequestCostWhenAProbeChainStopsAtAMultiPageListing(t *testing.T) {
 	if _, err := readPullSince(t, fake, revision); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(fake.snapshot()); got != 8 {
+	calls := fake.snapshot()
+	if got := len(calls); got != 8 {
 		t.Errorf("requests = %d, want 8: 2 pull request, 1 probe and 1 page of check runs, 3 status pages, 1 review", got)
+	}
+	if got := billedCount(calls); got != 6 {
+		t.Errorf("billed requests = %d, want 6: the 304 probe is free, the pull request read and 1 check-run page, 3 status pages and 1 review cost", got)
 	}
 	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 2, endpointStatuses: 3, endpointReviews: 1, endpointMerge: 0} {
 		if got := len(fake.callsTo(kind)); got != want {
@@ -350,8 +354,12 @@ func TestPullRequestCostWhenAListSpansPages(t *testing.T) {
 	if _, err := readPullSince(t, fake, revision); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(fake.snapshot()); got != 7 {
+	calls := fake.snapshot()
+	if got := len(calls); got != 7 {
 		t.Errorf("requests = %d, want 7: one 304 and one full read of the pull request, 3 check-run pages, 1 status, 1 review", got)
+	}
+	if got := billedCount(calls); got != 6 {
+		t.Errorf("billed requests = %d, want 6: the 304 is free, the pull request read, 3 check-run pages, 1 status and 1 review cost", got)
 	}
 	for kind, want := range map[endpoint]int{endpointPull: 2, endpointCheckRuns: 3, endpointStatuses: 1, endpointReviews: 1, endpointMerge: 0} {
 		if got := len(fake.callsTo(kind)); got != want {
@@ -374,8 +382,7 @@ func TestPullRequestReadsFullyWhenRevisionHasNoHead(t *testing.T) {
 	if headless == string(revision) {
 		t.Fatal("the revision holds no head to remove")
 	}
-	handler, conditional := countConditional(fake)
-	f, _ := newTestForge(t, handler)
+	f, conditional := newCountingForge(t, fake)
 	_, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), contracts.Revision(headless))
 	if errors.Is(err, contracts.ErrForgeNotModified) {
 		t.Fatal("err = ErrForgeNotModified, want a full read: a revision without a head cannot prove the checks unchanged")
@@ -418,7 +425,8 @@ func TestPullRequestAtRestCostsFourNotModifiedProbesAndNoQuota(t *testing.T) {
 	}
 }
 
-func countConditional(fake *fakeGitHub) (http.Handler, *atomic.Int32) {
+func newCountingForge(tb testing.TB, fake *fakeGitHub) (*forge, *atomic.Int32) {
+	tb.Helper()
 	var conditional atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(headerIfNoneMatch) != "" {
@@ -426,7 +434,9 @@ func countConditional(fake *fakeGitHub) (http.Handler, *atomic.Int32) {
 		}
 		fake.ServeHTTP(w, r)
 	})
-	return handler, &conditional
+	f, _ := newTestForge(tb, handler)
+	f.pageSize = fake.requestPageSize
+	return f, &conditional
 }
 
 func TestPullRequestReadsInFullWhenFirstPageIsFullAtAnotherPageSize(t *testing.T) {
@@ -436,10 +446,14 @@ func TestPullRequestReadsInFullWhenFirstPageIsFullAtAnotherPageSize(t *testing.T
 		checkRunFixture(1, "build", "completed", "success"),
 		checkRunFixture(2, "lint", "completed", "success"),
 	}
-	revision := readFirstRevision(t, fake)
-	handler, conditional := countConditional(fake)
-	f, _ := newTestForge(t, handler)
-	_, err := f.PullRequest(t.Context(), mustPullRef(t, testRepo(t)), revision)
+	f, conditional := newCountingForge(t, fake)
+	ref := mustPullRef(t, testRepo(t))
+	first, err := f.PullRequest(t.Context(), ref, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conditional.Store(0)
+	_, err = f.PullRequest(t.Context(), ref, first.Revision)
 	if errors.Is(err, contracts.ErrForgeNotModified) {
 		t.Fatal("err = ErrForgeNotModified: a first page of 2 items is full at page size 2, so the 304 proves nothing")
 	}
@@ -448,5 +462,56 @@ func TestPullRequestReadsInFullWhenFirstPageIsFullAtAnotherPageSize(t *testing.T
 	}
 	if got := conditional.Load(); got != 1 {
 		t.Errorf("conditional requests = %d, want 1: only the pull request carries its validator, the full first page is never probed", got)
+	}
+}
+
+func TestPullRequestCostCountsAProbeThatAnswers200(t *testing.T) {
+	fake := openFake(t)
+	fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+	f, _ := newCountingForge(t, fake)
+	ref := mustPullRef(t, testRepo(t))
+	first, err := f.PullRequest(t.Context(), ref, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.edit(func() {
+		fake.checkRuns = append(fake.checkRuns, checkRunFixture(2, "lint", "completed", "success"))
+	})
+	fake.resetCalls()
+	if _, err := f.PullRequest(t.Context(), ref, first.Revision); err != nil {
+		t.Fatal(err)
+	}
+	calls := fake.snapshot()
+	if got := len(calls); got != 6 {
+		t.Errorf("requests = %d, want 6: the pull request and 1 check-run probe, which answers 200 and so changes, then the pull request and 1 page of each listing", got)
+	}
+	if got := billedCount(calls); got != 5 {
+		t.Errorf("billed requests = %d, want 5: the 200 probe costs one unit, the pull request read, 1 check-run page, 1 status and 1 review cost", got)
+	}
+}
+
+func TestPullRequestCostCountsAProbeRefusedWithoutAnswer304(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusNotFound} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			fake := openFake(t)
+			fake.checkRuns = []map[string]any{checkRunFixture(1, "build", "completed", "success")}
+			fake.statuses = []map[string]any{statusFixture("ci/ok", "success")}
+			fake.reviews = []map[string]any{reviewPayload(1, "APPROVED", "2026-11-20T09:00:00Z")}
+			revision := readFirstRevision(t, fake)
+			fake.edit(func() {
+				fake.fail[endpointCheckRuns] = code
+			})
+			fake.resetCalls()
+			if _, err := readPullSince(t, fake, revision); err != nil {
+				t.Fatal(err)
+			}
+			calls := fake.snapshot()
+			if got := len(calls); got != 6 {
+				t.Errorf("requests = %d, want 6: the 304 pull request, the refused probe, then the full read of the pull request, the refused check runs, the statuses and the reviews", got)
+			}
+			if got := billedCount(calls); got != 5 {
+				t.Errorf("billed requests = %d, want 5: the refused probe costs one unit as any answer that is not a 304 does, the 304 is free", got)
+			}
+		})
 	}
 }

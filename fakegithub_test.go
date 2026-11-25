@@ -29,6 +29,7 @@ type fakeCall struct {
 	page        int
 	conditional bool
 	notModified bool
+	billed      bool
 }
 
 type fakeGitHub struct {
@@ -130,6 +131,7 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conditional := r.Header.Get(headerIfNoneMatch) != ""
 	g.calls = append(g.calls, fakeCall{endpoint: kind, sha: sha, page: pageParam(r), conditional: conditional})
 	if code, failing := g.fail[kind]; failing {
+		g.bill(w, false)
 		writeJSON(g.t, w, code, map[string]string{"message": "refused"})
 		return
 	}
@@ -137,6 +139,7 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case endpointPull:
 		g.respond(w, r, g.pull, "")
 	case endpointMerge:
+		g.bill(w, false)
 		writeJSON(g.t, w, g.mergeCode, map[string]bool{"merged": g.mergeCode == http.StatusOK})
 	case endpointCheckRuns:
 		g.servePage(w, r, g.checkRuns, func(page []map[string]any) any {
@@ -188,6 +191,28 @@ func (g *fakeGitHub) servePage(w http.ResponseWriter, r *http.Request, items []m
 	g.respond(w, r, wrap(page), strings.Join(links, ", "))
 }
 
+func (g *fakeGitHub) bill(w http.ResponseWriter, notModified bool) {
+	call := &g.calls[len(g.calls)-1]
+	call.notModified = notModified
+	call.billed = !notModified
+	if call.billed {
+		g.billed++
+	}
+	w.Header().Set(headerRateLimit, "5000")
+	w.Header().Set(headerRateRemaining, strconv.Itoa(5000-g.billed))
+	w.Header().Set(headerRateReset, strconv.FormatInt(testNow().Add(time.Hour).Unix(), 10))
+}
+
+func billedCount(calls []fakeCall) int {
+	count := 0
+	for _, call := range calls {
+		if call.billed {
+			count++
+		}
+	}
+	return count
+}
+
 func (g *fakeGitHub) respond(w http.ResponseWriter, r *http.Request, body any, link string) {
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -197,13 +222,7 @@ func (g *fakeGitHub) respond(w http.ResponseWriter, r *http.Request, body any, l
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 	w.Header().Set(headerETag, etag)
 	notModified := r.Header.Get(headerIfNoneMatch) == etag
-	g.calls[len(g.calls)-1].notModified = notModified
-	if !notModified {
-		g.billed++
-	}
-	w.Header().Set(headerRateLimit, "5000")
-	w.Header().Set(headerRateRemaining, strconv.Itoa(5000-g.billed))
-	w.Header().Set(headerRateReset, strconv.FormatInt(testNow().Add(time.Hour).Unix(), 10))
+	g.bill(w, notModified)
 	if link != "" && (!notModified || !g.omitLink) {
 		w.Header().Set(headerLink, link)
 	}
