@@ -12,29 +12,31 @@ import (
 )
 
 type forge struct {
-	host        contracts.ForgeHost
-	creds       contracts.ForgeCredentials
-	api         endpoints
-	client      *http.Client
-	now         func() time.Time
-	quota       quota
-	slots       chan struct{}
-	pageSize    int
-	feedSilence time.Duration
+	host         contracts.ForgeHost
+	creds        contracts.ForgeCredentials
+	api          endpoints
+	client       *http.Client
+	now          func() time.Time
+	quota        quota
+	slots        chan struct{}
+	pageSize     int
+	feedSilence  time.Duration
+	silenceAfter func(time.Duration) <-chan time.Time
 }
 
 func newForge(host contracts.ForgeHost, creds contracts.ForgeCredentials, api endpoints, client *http.Client, now func() time.Time) *forge {
 	policed := *client
 	policed.CheckRedirect = dropAuthorizationAcrossOrigins
 	return &forge{
-		host:        host,
-		creds:       creds,
-		api:         api,
-		client:      &policed,
-		now:         now,
-		slots:       make(chan struct{}, maxInFlight),
-		pageSize:    listingPageSize,
-		feedSilence: feedHeartbeat * feedMissedBeats,
+		host:         host,
+		creds:        creds,
+		api:          api,
+		client:       &policed,
+		now:          now,
+		slots:        make(chan struct{}, maxInFlight),
+		pageSize:     listingPageSize,
+		feedSilence:  feedHeartbeat * feedMissedBeats,
+		silenceAfter: time.After,
 	}
 }
 

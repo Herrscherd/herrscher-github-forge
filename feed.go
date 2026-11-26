@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -122,6 +123,14 @@ func (f *forge) subscribe(ctx context.Context, ref contracts.PullRequestRef) (st
 	return sub.ID, nil
 }
 
+func headerSilence(ctx context.Context, err error) error {
+	var netErr net.Error
+	if ctx.Err() == nil && errors.As(err, &netErr) && netErr.Timeout() {
+		return fmt.Errorf("no response headers from the event feed: %w: %w", ErrFeedSilent, err)
+	}
+	return err
+}
+
 func (f *forge) openFeed(ctx context.Context, subscription string) (io.ReadCloser, error) {
 	if err := f.quota.refusal(f.now()); err != nil {
 		return nil, err
@@ -133,7 +142,7 @@ func (f *forge) openFeed(ctx context.Context, subscription string) (io.ReadClose
 	resp, _, err := f.send(ctx, spec)
 	f.release()
 	if err != nil {
-		return nil, err
+		return nil, headerSilence(ctx, err)
 	}
 	f.quota.observe(resp.Header)
 	if err := f.feedCheck(ctx)(resp); err != nil {
@@ -172,7 +181,7 @@ func pullResourceURL(ref contracts.PullRequestRef) string {
 	return fmt.Sprintf("https://%s/%s/%s/pull/%d", publicHost, repo.Namespace(), repo.Name(), ref.Number())
 }
 
-func (f *forge) pump(ctx context.Context, stopStream context.CancelFunc, body io.Reader, out chan<- contracts.PullRequestSignal) {
+func (f *forge) pump(ctx context.Context, stopStream context.CancelFunc, body io.ReadCloser, out chan<- contracts.PullRequestSignal) {
 	frames := make(chan feedFrame)
 	stop := make(chan struct{})
 	readerDone := make(chan struct{})
@@ -183,25 +192,31 @@ func (f *forge) pump(ctx context.Context, stopStream context.CancelFunc, body io
 	defer func() {
 		close(stop)
 		stopStream()
+		releaseFeedBody(body)
 		<-readerDone
 		close(out)
 	}()
 	f.fanOut(ctx, frames, out)
 }
 
+func releaseFeedBody(body io.Closer) {
+	if err := body.Close(); err != nil {
+		return
+	}
+}
+
 func (f *forge) fanOut(ctx context.Context, frames <-chan feedFrame, out chan<- contracts.PullRequestSignal) {
 	var queue feedQueue
-	silence := time.NewTimer(f.feedSilence)
-	defer silence.Stop()
 	incoming := frames
+	silence := f.silenceAfter(f.feedSilence)
 	for {
-		if ctx.Err() != nil {
-			return
-		}
 		next, pending := queue.peek()
 		var sendOut chan<- contracts.PullRequestSignal
 		if pending {
 			sendOut = out
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		select {
 		case <-ctx.Done():
@@ -211,19 +226,18 @@ func (f *forge) fanOut(ctx context.Context, frames <-chan feedFrame, out chan<- 
 				return
 			}
 		case frame := <-incoming:
-			silence.Reset(f.feedSilence)
+			silence = f.silenceAfter(f.feedSilence)
 			switch {
 			case frame.err != nil:
 				queue.fail(frame.err)
-				incoming = nil
-				silence.Stop()
+				incoming, silence = nil, nil
 			case frame.beat:
 			default:
 				queue.add(frame.kind)
 			}
-		case <-silence.C:
+		case <-silence:
 			queue.fail(ErrFeedSilent)
-			incoming = nil
+			incoming, silence = nil, nil
 		}
 	}
 }
@@ -351,8 +365,8 @@ func dispatchFeed(name string, data []byte) feedFrame {
 		return feedFrame{beat: true}
 	}
 	var event feedEventWire
-	if err := json.Unmarshal(data, &event); err != nil {
-		return feedFrame{err: fmt.Errorf("decode pull request event: %w", err)}
+	if json.Unmarshal(data, &event) != nil {
+		return feedFrame{beat: true}
 	}
 	if kind, known := feedKindOf(event.Type); known {
 		return feedFrame{kind: kind}
