@@ -14,6 +14,7 @@ The plugin registers itself under the kind `github`, in the category `forge`. Th
 - Job logs: the tail of a CI job log, up to 1 MiB.
 - Review threads: the threads of a pull request, and replies to them.
 - Issues: one issue, and a filtered listing of issues (pull requests are left out of the listing and refused by number).
+- Pull request event feed (`PullRequestEvents`, the optional `contracts.PullRequestFeed`): one stream of changes of one pull request, read from the event subscriptions preview API that `gh event listen` uses. The plugin creates a subscription for the five pull request event types, then reads its `text/event-stream`. Each event maps to one kind of `PullRequestEventKind`: review submitted, new commit (head changed), state changed, merge conflict, checks changed. An event of another type is ignored. The feed is live only: the forge sends no replay, so a signal does not cover a change made while the stream was down, and the caller reads `PullRequest` to see the current state. A stream that stops sending heartbeats for about 27 s (three heartbeats of 9 s) ends with `ErrFeedSilent`. A stream the forge ends ends with `ErrFeedEnded`, and a stream the forge ends as access revoked ends with `ErrFeedRefused`; each of these is the last signal, and the channel closes after it. Cancelling the context closes the channel with no signal after the cancellation.
 
 ## Endpoints
 
@@ -39,6 +40,9 @@ Failures wrap the sentinels and error types of the contracts port:
 | 403 with `x-ratelimit-remaining: 0` or `Retry-After`, or 429 | `ForgeRateLimitedError` |
 | 404, or a GraphQL `NOT_FOUND` | `ErrForgeNotFound` |
 | 304 on every request of a pull request read with a revision (the pull request and each listing the revision covers) | `ErrForgeNotModified` |
+| 403 or 404 with the message `Event subscriptions are not enabled for this account` on the event feed (preview not granted to the account) | `ErrFeedRefused` at open, and no channel |
+| a repository on a GitHub Enterprise Server host, for the event feed | `ErrFeedRefused`, with no request sent (the feed exists on GitHub.com only) |
+| an event feed stream ended as `access_revoked` | `ErrFeedRefused`, as the last signal of the feed |
 | 403 or 404 on the check runs or the commit statuses of a pull request | the pull request is returned with `ChecksUnknown` and no error |
 | 403 or 404 on the reviews of a pull request | the pull request is returned with an empty `LatestReview` and no error |
 | 403 on the check runs or the commit statuses of `Checks` | `ErrForgeForbidden`, with no checks returned |
@@ -55,6 +59,8 @@ A repository on another host is refused with `ErrForgeWrongHost`, and a namespac
 - Response bodies are read up to 8 MiB. A larger body is refused.
 - At most 4 requests are in flight at once. A caller waiting for a slot stops when its context is done.
 - Only REST core responses update the quota the plugin holds for the token (`x-ratelimit-limit`, `-remaining`, `-reset`, when `x-ratelimit-resource` is `core` or absent). A GraphQL response carries its own budget and is ignored for the quota, and GraphQL calls are not refused by the REST budget. Each REST core response that is not a 304 costs one request of that budget, and a 304 costs none. The quota is only taken from a response that carries both the limit and the remaining count. When the remaining budget is below 10% of the limit and the reset is still ahead, further calls are refused with `ForgeRateLimitedError` without being sent. A response with `x-ratelimit-remaining: 0` and no reset header does not refuse calls locally: the forge did not say when the budget refills, so the call is sent and the answer is taken as usual.
+- The event feed is governed by the same REST core budget as the other REST calls, as the plugin assumes: its subscription POST and its stream open are refused locally when the budget is spent, and their responses update the quota. The event API's own accounting is not documented, so this is an assumption to confirm against real responses. The stream itself costs one request when it opens and is not re-opened by the plugin, so a long stream does not consume the budget.
+- The event feed reads each event line up to 64 KiB and each event up to 256 KiB. A larger event ends the feed with an error rather than buffering without bound.
 - Responses that arrive out of order cannot roll the quota back. Within one reset window the lowest remaining count is kept. A window that resets later replaces the earlier one, and a response of an earlier window is ignored.
 - The rate limit a connection reports is the zero `ForgeRateLimit` (`Remaining` 0, `Reset` the zero time) when the response carries no `x-ratelimit-remaining` header: the forge did not say, as the contract documents for a missing reset.
 - A throttle `Retry-After` is read as a number of seconds or as an HTTP date.
@@ -72,6 +78,8 @@ A repository on another host is refused with `ErrForgeWrongHost`, and a namespac
 The quality chain is `scripts/check.sh`: tidy, the golangci-lint set, the comment check (`tools/commentcheck`), the dash check, the tests with `-race`, the build with `CGO_ENABLED=0`, and `govulncheck`. CI runs the same script.
 
 Tests run against `httptest` servers only. No test reaches the real GitHub.
+
+The event feed is a preview API. The protocol follows the `gh` CLI source (`pkg/cmd/event/client/client.go`, `pkg/cmd/event/listen/listen.go`, `internal/eventstream/sse.go` of cli/cli v2.105.0) and has not been checked against a live account that holds the preview.
 
 ## License
 
