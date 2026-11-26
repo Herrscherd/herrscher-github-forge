@@ -668,13 +668,72 @@ func TestPullRequestEventsReconnectEndsWithFeedEnded(t *testing.T) {
 	expectClosed(t, signals)
 }
 
+type fakeHeaderTimer struct {
+	mu      sync.Mutex
+	expire  func()
+	stopped bool
+	fired   bool
+}
+
+func headerTimerFrom(f *forge) *fakeHeaderTimer {
+	timer := &fakeHeaderTimer{}
+	f.startHeaderTimer = func(_ time.Duration, expire func()) headerTimer {
+		timer.mu.Lock()
+		defer timer.mu.Unlock()
+		timer.expire = expire
+		return timer
+	}
+	return timer
+}
+
+func (h *fakeHeaderTimer) Stop() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	active := !h.stopped && !h.fired
+	h.stopped = true
+	return active
+}
+
+func (h *fakeHeaderTimer) fire() bool {
+	h.mu.Lock()
+	if h.stopped || h.fired || h.expire == nil {
+		h.mu.Unlock()
+		return false
+	}
+	h.fired = true
+	expire := h.expire
+	h.mu.Unlock()
+	expire()
+	return true
+}
+
 func TestPullRequestEventsSilentHeadersEndWithSilence(t *testing.T) {
+	requested := make(chan struct{}, 1)
 	f := feedForge(t, subscribeCreated(t, nil), func(_ http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
 		<-r.Context().Done()
 	})
-	f.headerWait = testHeaderWait
-	if _, err := f.PullRequestEvents(t.Context(), feedRef(t)); !errors.Is(err, ErrFeedSilent) {
-		t.Fatalf("PullRequestEvents error = %v, want ErrFeedSilent", err)
+	timer := headerTimerFrom(f)
+	result := make(chan error, 1)
+	go func() {
+		_, err := f.PullRequestEvents(t.Context(), feedRef(t))
+		result <- err
+	}()
+	select {
+	case <-requested:
+	case <-time.After(testFeedWait):
+		t.Fatal("the event feed request never reached the server")
+	}
+	if !timer.fire() {
+		t.Fatal("the header timer did not expire while the headers were pending")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrFeedSilent) {
+			t.Fatalf("PullRequestEvents error = %v, want ErrFeedSilent", err)
+		}
+	case <-time.After(testFeedWait):
+		t.Fatal("PullRequestEvents did not return after the header timer expired")
 	}
 }
 
@@ -704,9 +763,11 @@ func TestPullRequestEventsHandshakeTimeoutIsNotSilence(t *testing.T) {
 		}
 	})
 	accepted := make(chan net.Conn, 1)
-	go holdAccepted(listener, accepted)
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go holdAccepted(listener, accepted, done)
 	f := feedForge(t, subscribeCreated(t, nil), streamScript(t))
-	f.headerWait = testFeedWait
+	headerTimerFrom(f)
 	dialer := &net.Dialer{}
 	f.client.Transport = &tlsStream{
 		base: f.client.Transport,
@@ -737,17 +798,21 @@ func TestPullRequestEventsHandshakeTimeoutIsNotSilence(t *testing.T) {
 	}
 }
 
-func holdAccepted(listener net.Listener, accepted chan<- net.Conn) {
+func holdAccepted(listener net.Listener, accepted chan<- net.Conn, done <-chan struct{}) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		accepted <- conn
+		select {
+		case accepted <- conn:
+		case <-done:
+			return
+		}
 	}
 }
 
-func streamAfterDelay(tb testing.TB, delay time.Duration, frames ...string) http.HandlerFunc {
+func streamAfterRelease(tb testing.TB, release <-chan struct{}, frames ...string) http.HandlerFunc {
 	tb.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
@@ -759,7 +824,7 @@ func streamAfterDelay(tb testing.TB, delay time.Duration, frames ...string) http
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 		select {
-		case <-time.After(delay):
+		case <-release:
 		case <-r.Context().Done():
 			return
 		}
@@ -772,11 +837,16 @@ func streamAfterDelay(tb testing.TB, delay time.Duration, frames ...string) http
 }
 
 func TestPullRequestEventsHealthyFeedLongerThanHeaderWait(t *testing.T) {
-	f := feedForge(t, subscribeCreated(t, nil), streamAfterDelay(t, 5*testHeaderWait, feedEvent(testReviewEvent)))
-	f.headerWait = testHeaderWait
+	release := make(chan struct{})
+	f := feedForge(t, subscribeCreated(t, nil), streamAfterRelease(t, release, feedEvent(testReviewEvent)))
+	timer := headerTimerFrom(f)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	signals := openFeed(ctx, t, f)
+	if timer.fire() {
+		t.Fatal("the header timer expired after the headers were received")
+	}
+	close(release)
 	if signal := nextSignal(t, signals); signal.Err != nil || signal.Kind != contracts.PullRequestReviewSubmitted {
 		t.Fatalf("first signal = %+v, want review submitted with no error", signal)
 	}

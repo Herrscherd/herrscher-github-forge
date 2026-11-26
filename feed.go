@@ -158,7 +158,7 @@ func (f *forge) openFeed(ctx context.Context, subscription string) (io.ReadClose
 	}
 	spec := request{method: http.MethodGet, target: f.restURL(nil, subscriptionsElement, subscription, eventsElement), accept: mediaTypeEventStream}
 	openCtx, cancelOpen := context.WithCancelCause(ctx)
-	headers := time.AfterFunc(f.headerWait, func() { cancelOpen(ErrFeedSilent) })
+	headers := f.startHeaderTimer(feedHeaderWait, func() { cancelOpen(ErrFeedSilent) })
 	resp, _, err := f.send(openCtx, spec)
 	f.release()
 	if !headers.Stop() {
@@ -182,11 +182,19 @@ func (f *forge) openFeed(ctx context.Context, subscription string) (io.ReadClose
 }
 
 func (f *forge) silentHeaders(resp *http.Response, err error) error {
-	silence := fmt.Errorf("no response headers from the event feed within %s: %w", f.headerWait, ErrFeedSilent)
+	silence := fmt.Errorf("no response headers from the event feed within %s: %w", feedHeaderWait, ErrFeedSilent)
 	if resp == nil {
 		return errors.Join(silence, err)
 	}
 	return errors.Join(silence, err, resp.Body.Close())
+}
+
+type headerTimer interface {
+	Stop() bool
+}
+
+func newHeaderTimer(d time.Duration, expire func()) headerTimer {
+	return time.AfterFunc(d, expire)
 }
 
 type feedBody struct {
