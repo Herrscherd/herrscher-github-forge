@@ -21,6 +21,7 @@ type forge struct {
 	slots           chan struct{}
 	pageSize        int
 	feedSilence     time.Duration
+	headerWait      time.Duration
 	newSilenceTimer func(time.Duration) silenceTimer
 }
 
@@ -36,6 +37,7 @@ func newForge(host contracts.ForgeHost, creds contracts.ForgeCredentials, api en
 		slots:           make(chan struct{}, maxInFlight),
 		pageSize:        listingPageSize,
 		feedSilence:     feedHeartbeat * feedMissedBeats,
+		headerWait:      feedHeartbeat * feedMissedBeats,
 		newSilenceTimer: newStdSilenceTimer,
 	}
 }

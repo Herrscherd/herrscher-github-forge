@@ -672,8 +672,71 @@ func TestPullRequestEventsSilentHeadersEndWithSilence(t *testing.T) {
 	f := feedForge(t, subscribeCreated(t, nil), func(_ http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	})
-	f.client.Transport = &http.Transport{ResponseHeaderTimeout: testHeaderWait}
+	f.headerWait = testHeaderWait
 	if _, err := f.PullRequestEvents(t.Context(), feedRef(t)); !errors.Is(err, ErrFeedSilent) {
 		t.Fatalf("PullRequestEvents error = %v, want ErrFeedSilent", err)
+	}
+}
+
+type tlsStream struct {
+	base http.RoundTripper
+	tls  http.RoundTripper
+}
+
+func (t *tlsStream) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet {
+		secure := req.Clone(req.Context())
+		secure.URL.Scheme = "https"
+		secure.URL.Host = "feed.test"
+		return t.tls.RoundTrip(secure)
+	}
+	return t.base.RoundTrip(req)
+}
+
+func TestPullRequestEventsHandshakeTimeoutIsNotSilence(t *testing.T) {
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	})
+	go holdAccepted(t, listener)
+	f := feedForge(t, subscribeCreated(t, nil), streamScript(t))
+	f.headerWait = testFeedWait
+	dialer := &net.Dialer{}
+	f.client.Transport = &tlsStream{
+		base: f.client.Transport,
+		tls: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp", listener.Addr().String())
+			},
+			TLSHandshakeTimeout: testHeaderWait,
+		},
+	}
+	_, err = f.PullRequestEvents(t.Context(), feedRef(t))
+	if errors.Is(err, ErrFeedSilent) {
+		t.Fatalf("PullRequestEvents error = %v, a TLS handshake timeout is not a silent feed", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("PullRequestEvents error = %v, want the handshake timeout kept in the chain", err)
+	}
+}
+
+func holdAccepted(t *testing.T, listener net.Listener) {
+	t.Helper()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() {
+			if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				t.Error(closeErr)
+			}
+		})
 	}
 }

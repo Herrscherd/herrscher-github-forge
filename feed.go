@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -123,19 +122,6 @@ func (f *forge) subscribe(ctx context.Context, ref contracts.PullRequestRef) (st
 	return sub.ID, nil
 }
 
-func headerSilence(ctx context.Context, err error) error {
-	var netErr net.Error
-	if ctx.Err() == nil && errors.As(err, &netErr) && netErr.Timeout() && !isConnectionFailure(err) {
-		return fmt.Errorf("no response headers from the event feed: %w: %w", ErrFeedSilent, err)
-	}
-	return err
-}
-
-func isConnectionFailure(err error) bool {
-	var opErr *net.OpError
-	return errors.As(err, &opErr)
-}
-
 type silenceTimer interface {
 	C() <-chan time.Time
 	Reset(d time.Duration) bool
@@ -170,19 +156,48 @@ func (f *forge) openFeed(ctx context.Context, subscription string) (io.ReadClose
 		return nil, err
 	}
 	spec := request{method: http.MethodGet, target: f.restURL(nil, subscriptionsElement, subscription, eventsElement), accept: mediaTypeEventStream}
-	resp, _, err := f.send(ctx, spec)
+	openCtx, cancelOpen := context.WithCancelCause(ctx)
+	headers := time.AfterFunc(f.headerWait, func() { cancelOpen(ErrFeedSilent) })
+	resp, _, err := f.send(openCtx, spec)
 	f.release()
+	if !headers.Stop() {
+		cancelOpen(nil)
+		return nil, f.silentHeaders(resp, err)
+	}
 	if err != nil {
-		return nil, headerSilence(ctx, err)
+		cancelOpen(nil)
+		return nil, err
 	}
 	f.quota.observe(resp.Header)
-	if err := f.feedCheck(ctx)(resp); err != nil {
+	if err := f.feedCheck(openCtx)(resp); err != nil {
+		cancelOpen(nil)
 		return nil, errors.Join(err, resp.Body.Close())
 	}
 	if !strings.HasPrefix(resp.Header.Get("Content-Type"), mediaTypeEventStream) {
+		cancelOpen(nil)
 		return nil, errors.Join(errNotEventStream, resp.Body.Close())
 	}
-	return resp.Body, nil
+	return feedBody{ReadCloser: resp.Body, release: cancelOpen}, nil
+}
+
+func (f *forge) silentHeaders(resp *http.Response, err error) error {
+	silence := fmt.Errorf("no response headers from the event feed within %s: %w", f.headerWait, ErrFeedSilent)
+	if resp == nil {
+		return errors.Join(silence, err)
+	}
+	return errors.Join(silence, err, resp.Body.Close())
+}
+
+type feedBody struct {
+	io.ReadCloser
+
+	release context.CancelCauseFunc
+}
+
+func (b feedBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.release(nil)
+	return err
 }
 
 func (f *forge) feedCheck(ctx context.Context) statusVerifier {
