@@ -4,7 +4,7 @@ go 1.27.0
 
 toolchain go1.27.4
 
-require github.com/Herrscherd/herrscher-contracts v0.44.0
+require github.com/Herrscherd/herrscher-contracts v0.47.1-0.20261126121848-4305a5afed73
 
 require (
 	github.com/nicksnyder/go-i18n/v2 v2.7.0 // indirect
