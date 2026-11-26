@@ -38,13 +38,23 @@ type request struct {
 	target      *url.URL
 	body        []byte
 	ifNoneMatch string
+	accept      string
 	accepted    []int
 	graphQL     bool
 }
 
 type responder func(token contracts.ForgeToken, resp *http.Response) error
 
+type statusVerifier func(resp *http.Response) error
+
 func (f *forge) exchange(ctx context.Context, spec request, handle responder) error {
+	check := func(resp *http.Response) error {
+		return f.statusError(ctx, resp, spec.accepted)
+	}
+	return f.exchangeChecked(ctx, spec, check, handle)
+}
+
+func (f *forge) exchangeChecked(ctx context.Context, spec request, check statusVerifier, handle responder) error {
 	if !spec.graphQL {
 		if err := f.quota.refusal(f.now()); err != nil {
 			return err
@@ -54,24 +64,32 @@ func (f *forge) exchange(ctx context.Context, spec request, handle responder) er
 		return err
 	}
 	defer f.release()
-	token, err := f.token(ctx)
+	resp, token, err := f.send(ctx, spec)
 	if err != nil {
 		return err
+	}
+	return f.finish(resp, check, token, handle)
+}
+
+func (f *forge) send(ctx context.Context, spec request) (*http.Response, contracts.ForgeToken, error) {
+	token, err := f.token(ctx)
+	if err != nil {
+		return nil, contracts.ForgeToken{}, err
 	}
 	req, err := newRequest(ctx, spec, token)
 	if err != nil {
-		return err
+		return nil, token, err
 	}
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("forge request: %w", err)
+		return nil, token, fmt.Errorf("forge request: %w", err)
 	}
-	return f.finish(ctx, resp, spec.accepted, token, handle)
+	return resp, token, nil
 }
 
-func (f *forge) finish(ctx context.Context, resp *http.Response, accepted []int, token contracts.ForgeToken, handle responder) error {
+func (f *forge) finish(resp *http.Response, check statusVerifier, token contracts.ForgeToken, handle responder) error {
 	f.quota.observe(resp.Header)
-	err := f.statusError(ctx, resp, accepted)
+	err := check(resp)
 	if err == nil {
 		err = handle(token, resp)
 	}
@@ -112,7 +130,11 @@ func newRequest(ctx context.Context, spec request, token contracts.ForgeToken) (
 		return nil, fmt.Errorf("build forge request: %w", err)
 	}
 	req.Header.Set(headerAuthorization, "Bearer "+token.Secret())
-	req.Header.Set(headerAccept, mediaTypeJSON)
+	accept := mediaTypeJSON
+	if spec.accept != "" {
+		accept = spec.accept
+	}
+	req.Header.Set(headerAccept, accept)
 	req.Header.Set(headerAPIVersion, apiVersion)
 	if spec.body != nil {
 		req.Header.Set(headerContentType, contentTypeJSON)

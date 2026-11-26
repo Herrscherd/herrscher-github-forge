@@ -13,6 +13,10 @@ var (
 	ErrNamesPullRequest = errors.New("the number names a pull request, not an issue")
 	// ErrInvalidLabel reports a label that holds a comma, which an issue listing cannot filter by.
 	ErrInvalidLabel = errors.New("label contains a comma, which an issue listing cannot filter by")
+	// ErrFeedSilent reports that the pull request event feed sent no heartbeat for about three heartbeat periods, and that the stream is treated as dead.
+	ErrFeedSilent = errors.New("pull request event feed went silent")
+	// ErrFeedEnded reports that the forge ended the pull request event feed, which the caller reads on a cadence after.
+	ErrFeedEnded = errors.New("pull request event feed ended")
 )
 
 var (
@@ -30,6 +34,9 @@ var (
 	errRefusedRepo         = errors.New("repository is refused by the contracts port and left out of the listing")
 	errTooManyPages        = errors.New("listing has more pages than the plugin reads")
 	errUnreadableRevision  = errors.New("revision is not one this plugin wrote")
+	errFeedEventTooLarge   = errors.New("pull request event exceeds the read limit")
+	errNoSubscription      = errors.New("forge created no event subscription")
+	errNotEventStream      = errors.New("forge answered the event feed with a body that is not an event stream")
 )
 
 type graphQLError struct {
