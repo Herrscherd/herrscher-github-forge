@@ -125,10 +125,41 @@ func (f *forge) subscribe(ctx context.Context, ref contracts.PullRequestRef) (st
 
 func headerSilence(ctx context.Context, err error) error {
 	var netErr net.Error
-	if ctx.Err() == nil && errors.As(err, &netErr) && netErr.Timeout() {
+	if ctx.Err() == nil && errors.As(err, &netErr) && netErr.Timeout() && !isConnectionFailure(err) {
 		return fmt.Errorf("no response headers from the event feed: %w: %w", ErrFeedSilent, err)
 	}
 	return err
+}
+
+func isConnectionFailure(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
+}
+
+type silenceTimer interface {
+	C() <-chan time.Time
+	Reset(d time.Duration) bool
+	Stop() bool
+}
+
+type stdSilenceTimer struct {
+	timer *time.Timer
+}
+
+func (s stdSilenceTimer) C() <-chan time.Time {
+	return s.timer.C
+}
+
+func (s stdSilenceTimer) Reset(d time.Duration) bool {
+	return s.timer.Reset(d)
+}
+
+func (s stdSilenceTimer) Stop() bool {
+	return s.timer.Stop()
+}
+
+func newStdSilenceTimer(d time.Duration) silenceTimer {
+	return stdSilenceTimer{timer: time.NewTimer(d)}
 }
 
 func (f *forge) openFeed(ctx context.Context, subscription string) (io.ReadCloser, error) {
@@ -208,7 +239,9 @@ func releaseFeedBody(body io.Closer) {
 func (f *forge) fanOut(ctx context.Context, frames <-chan feedFrame, out chan<- contracts.PullRequestSignal) {
 	var queue feedQueue
 	incoming := frames
-	silence := f.silenceAfter(f.feedSilence)
+	silence := f.newSilenceTimer(f.feedSilence)
+	defer silence.Stop()
+	silenceC := silence.C()
 	for {
 		next, pending := queue.peek()
 		var sendOut chan<- contracts.PullRequestSignal
@@ -226,18 +259,19 @@ func (f *forge) fanOut(ctx context.Context, frames <-chan feedFrame, out chan<- 
 				return
 			}
 		case frame := <-incoming:
-			silence = f.silenceAfter(f.feedSilence)
+			silence.Reset(f.feedSilence)
 			switch {
 			case frame.err != nil:
 				queue.fail(frame.err)
-				incoming, silence = nil, nil
+				incoming, silenceC = nil, nil
+				silence.Stop()
 			case frame.beat:
 			default:
 				queue.add(frame.kind)
 			}
-		case <-silence:
+		case <-silenceC:
 			queue.fail(ErrFeedSilent)
-			incoming, silence = nil, nil
+			incoming, silenceC = nil, nil
 		}
 	}
 }

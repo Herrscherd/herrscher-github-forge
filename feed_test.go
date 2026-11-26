@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -214,10 +216,42 @@ func feedWithScript(tb testing.TB, body *scriptedBody) (*forge, *scriptedTranspo
 	return f, tr
 }
 
-func silenceFrom(f *forge) chan time.Time {
-	fired := make(chan time.Time, 1)
-	f.silenceAfter = func(time.Duration) <-chan time.Time { return fired }
-	return fired
+type fakeSilence struct {
+	fire   chan time.Time
+	resets chan struct{}
+}
+
+func (s *fakeSilence) C() <-chan time.Time {
+	return s.fire
+}
+
+func (s *fakeSilence) Reset(time.Duration) bool {
+	select {
+	case s.resets <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (s *fakeSilence) Stop() bool {
+	return true
+}
+
+func silenceFrom(f *forge) *fakeSilence {
+	s := &fakeSilence{fire: make(chan time.Time, 1), resets: make(chan struct{}, 16)}
+	f.newSilenceTimer = func(time.Duration) silenceTimer { return s }
+	return s
+}
+
+func waitResets(tb testing.TB, resets <-chan struct{}, n int) {
+	tb.Helper()
+	for range n {
+		select {
+		case <-resets:
+		case <-time.After(testFeedWait):
+			tb.Fatal("the feed did not process the frames in time")
+		}
+	}
 }
 
 func drainAfterCancel(tb testing.TB, signals <-chan contracts.PullRequestSignal) int {
@@ -357,7 +391,7 @@ func TestPullRequestEventsSilenceEndsWithTypedError(t *testing.T) {
 	if first.Kind != contracts.PullRequestStateChanged {
 		t.Fatalf("first signal = %+v, want state changed", first)
 	}
-	fired <- time.Time{}
+	fired.fire <- time.Time{}
 	last := nextSignal(t, signals)
 	if !errors.Is(last.Err, ErrFeedSilent) || last.Kind != 0 {
 		t.Fatalf("last signal = %+v, want ErrFeedSilent with a zero kind", last)
@@ -526,7 +560,7 @@ func runFeedEndCase(t *testing.T, tc feedEndCase) {
 		nextSignal(t, signals)
 	}
 	if tc.silent {
-		fired <- time.Time{}
+		fired.fire <- time.Time{}
 	}
 	if tc.cancel {
 		cancel()
@@ -556,7 +590,7 @@ func TestPullRequestEventsCancelClosesIdleStream(t *testing.T) {
 	}
 }
 
-func TestPullRequestEventsCancelIsFinalUnderLoad(t *testing.T) {
+func TestPullRequestEventsCancelRoundsStatistical(t *testing.T) {
 	f, tr := feedWithScript(t, newScriptedBody(feedEvent(testStateEvent), true, false))
 	late := 0
 	for range testRoundsCancel {
@@ -569,6 +603,44 @@ func TestPullRequestEventsCancelIsFinalUnderLoad(t *testing.T) {
 	}
 	if late != 0 {
 		t.Fatalf("%d signals arrived after cancellation, want 0", late)
+	}
+}
+
+func TestPullRequestEventsCancelWithPendingSignalSendsNothing(t *testing.T) {
+	body := newScriptedBody(feedEvent(testReviewEvent)+feedBeat, false, true)
+	f, _ := feedWithScript(t, body)
+	timer := silenceFrom(f)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	signals := openFeed(ctx, t, f)
+	waitResets(t, timer.resets, 2)
+	cancel()
+	waitBarrier(t, body.release)
+	expectClosed(t, signals)
+}
+
+type failingStream struct {
+	base http.RoundTripper
+	err  error
+}
+
+func (t *failingStream) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet {
+		return nil, t.err
+	}
+	return t.base.RoundTrip(req)
+}
+
+func TestPullRequestEventsDialFailureIsNotSilence(t *testing.T) {
+	f := feedForge(t, subscribeCreated(t, nil), streamScript(t))
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	f.client.Transport = &failingStream{base: f.client.Transport, err: dialErr}
+	_, err := f.PullRequestEvents(t.Context(), feedRef(t))
+	if errors.Is(err, ErrFeedSilent) {
+		t.Fatalf("PullRequestEvents error = %v, a dial timeout is not a silent feed", err)
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("PullRequestEvents error = %v, want the dial timeout kept in the chain", err)
 	}
 }
 
