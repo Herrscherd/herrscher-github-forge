@@ -27,6 +27,7 @@ const (
 	feedLineLimit        = 64 << 10
 	feedEventLimit       = 256 << 10
 	feedScanBuffer       = 4 << 10
+	feedHeaderWait       = 30 * time.Second
 )
 
 type subscriptionRequest struct {

@@ -703,7 +703,8 @@ func TestPullRequestEventsHandshakeTimeoutIsNotSilence(t *testing.T) {
 			t.Error(closeErr)
 		}
 	})
-	go holdAccepted(t, listener)
+	accepted := make(chan net.Conn, 1)
+	go holdAccepted(listener, accepted)
 	f := feedForge(t, subscribeCreated(t, nil), streamScript(t))
 	f.headerWait = testFeedWait
 	dialer := &net.Dialer{}
@@ -724,19 +725,59 @@ func TestPullRequestEventsHandshakeTimeoutIsNotSilence(t *testing.T) {
 	if !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Fatalf("PullRequestEvents error = %v, want the handshake timeout kept in the chain", err)
 	}
-}
-
-func holdAccepted(t *testing.T, listener net.Listener) {
-	t.Helper()
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
+	select {
+	case conn := <-accepted:
 		t.Cleanup(func() {
 			if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 				t.Error(closeErr)
 			}
 		})
+	case <-time.After(testFeedWait):
+		t.Fatal("the listener accepted no connection, so the dial did not succeed")
+	}
+}
+
+func holdAccepted(listener net.Listener, accepted chan<- net.Conn) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- conn
+	}
+}
+
+func streamAfterDelay(tb testing.TB, delay time.Duration, frames ...string) http.HandlerFunc {
+	tb.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			tb.Error("response writer cannot flush")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+		for _, frame := range frames {
+			writeBody(tb, w, frame)
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}
+}
+
+func TestPullRequestEventsHealthyFeedLongerThanHeaderWait(t *testing.T) {
+	f := feedForge(t, subscribeCreated(t, nil), streamAfterDelay(t, 5*testHeaderWait, feedEvent(testReviewEvent)))
+	f.headerWait = testHeaderWait
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	signals := openFeed(ctx, t, f)
+	if signal := nextSignal(t, signals); signal.Err != nil || signal.Kind != contracts.PullRequestReviewSubmitted {
+		t.Fatalf("first signal = %+v, want review submitted with no error", signal)
 	}
 }
