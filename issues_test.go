@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
+	"github.com/Herrscherd/herrscher-contracts/forgetest"
 )
 
 func issuePayload(number int, state string) map[string]any {
@@ -224,6 +225,9 @@ func TestOpenIssuePostsTheDraftAndMapsTheIssue(t *testing.T) {
 func TestCommentOnIssuePostsTheBody(t *testing.T) {
 	var posted atomic.Bool
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues/3", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, issuePayload(3, "open"))
+	})
 	mux.HandleFunc("POST /repos/acme/widgets/issues/3/comments", func(w http.ResponseWriter, r *http.Request) {
 		var sent struct {
 			Body string `json:"body"`
@@ -246,17 +250,30 @@ func TestCommentOnIssuePostsTheBody(t *testing.T) {
 	}
 }
 
+func TestCommentOnIssueRefusesAPullRequestNumberWithoutPosting(t *testing.T) {
+	var posted atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues/5", func(w http.ResponseWriter, _ *http.Request) {
+		payload := issuePayload(5, "open")
+		payload["pull_request"] = map[string]any{"url": "https://api.github.com/repos/acme/widgets/pulls/5"}
+		writeJSON(t, w, http.StatusOK, payload)
+	})
+	mux.HandleFunc("POST /repos/acme/widgets/issues/5/comments", func(http.ResponseWriter, *http.Request) { posted.Store(true) })
+	f, _ := newTestForge(t, mux)
+	if err := f.CommentOnIssue(t.Context(), mustIssueRef(t, testRepo(t), 5), "hi"); !errors.Is(err, ErrNamesPullRequest) {
+		t.Fatalf("err = %v, want ErrNamesPullRequest", err)
+	}
+	if posted.Load() {
+		t.Fatal("a comment was posted on a pull request through the issue port")
+	}
+}
+
 func TestIssueWritesRefuseEmptyTextWithoutSending(t *testing.T) {
 	var calls atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(http.ResponseWriter, *http.Request) { calls.Add(1) })
 	f, _ := newTestForge(t, mux)
-	if _, err := f.OpenIssue(t.Context(), contracts.IssueDraft{Repo: testRepo(t), Title: "  "}); !errors.Is(err, contracts.ErrEmptyIssueTitle) {
-		t.Errorf("OpenIssue err = %v, want ErrEmptyIssueTitle", err)
-	}
-	if err := f.CommentOnIssue(t.Context(), mustIssueRef(t, testRepo(t), 3), ""); !errors.Is(err, contracts.ErrEmptyComment) {
-		t.Errorf("CommentOnIssue err = %v, want ErrEmptyComment", err)
-	}
+	forgetest.CheckIssueWriterRefusesEmptyText(t, f, testRepo(t))
 	if calls.Load() != 0 {
 		t.Fatalf("%d requests sent, want none", calls.Load())
 	}

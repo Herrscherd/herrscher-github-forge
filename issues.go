@@ -208,6 +208,9 @@ func (f *forge) CommentOnIssue(ctx context.Context, ref contracts.IssueRef, body
 	if strings.TrimSpace(body) == "" {
 		return contracts.ErrEmptyComment
 	}
+	if _, err := f.Issue(ctx, ref); err != nil {
+		return err
+	}
 	payload, err := encodeJSON(commentWire{Body: body})
 	if err != nil {
 		return err
