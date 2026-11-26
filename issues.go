@@ -162,3 +162,59 @@ func (f *forge) Issues(ctx context.Context, repo contracts.ForgeRepoRef, query c
 	}
 	return contracts.Page[contracts.Issue]{Items: items, Next: next}, nil
 }
+
+type issueCreateWire struct {
+	Title  string   `json:"title"`
+	Body   string   `json:"body,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+}
+
+type commentWire struct {
+	Body string `json:"body"`
+}
+
+func (f *forge) OpenIssue(ctx context.Context, draft contracts.IssueDraft) (contracts.Issue, error) {
+	if err := f.checkRepo(draft.Repo); err != nil {
+		return contracts.Issue{}, err
+	}
+	if strings.TrimSpace(draft.Title) == "" {
+		return contracts.Issue{}, contracts.ErrEmptyIssueTitle
+	}
+	payload, err := encodeJSON(issueCreateWire{Title: draft.Title, Body: draft.Body, Labels: draft.Labels})
+	if err != nil {
+		return contracts.Issue{}, err
+	}
+	spec := request{method: http.MethodPost, target: f.repoURL(draft.Repo, nil, "issues"), body: payload}
+	var opened contracts.Issue
+	exchangeErr := f.exchange(ctx, spec, func(_ contracts.ForgeToken, resp *http.Response) error {
+		var wire issueWire
+		if err := decodeJSON(resp.Body, &wire); err != nil {
+			return err
+		}
+		converted, err := wire.toIssue(draft.Repo)
+		if err != nil {
+			return err
+		}
+		opened = converted
+		return nil
+	})
+	return opened, exchangeErr
+}
+
+func (f *forge) CommentOnIssue(ctx context.Context, ref contracts.IssueRef, body string) error {
+	if err := f.checkRepo(ref.Repo()); err != nil {
+		return err
+	}
+	if strings.TrimSpace(body) == "" {
+		return contracts.ErrEmptyComment
+	}
+	if _, err := f.Issue(ctx, ref); err != nil {
+		return err
+	}
+	payload, err := encodeJSON(commentWire{Body: body})
+	if err != nil {
+		return err
+	}
+	spec := request{method: http.MethodPost, target: f.repoURL(ref.Repo(), nil, "issues", strconv.Itoa(ref.Number()), "comments"), body: payload}
+	return f.exchange(ctx, spec, func(contracts.ForgeToken, *http.Response) error { return nil })
+}
