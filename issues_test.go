@@ -63,7 +63,7 @@ func TestIssueNotFound(t *testing.T) {
 	}
 }
 
-func TestIssuesFiltersPullRequestsAndFollowsLink(t *testing.T) {
+func TestIssuesMarksPullRequestsAndFollowsLink(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/acme/widgets/issues", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -81,8 +81,14 @@ func TestIssuesFiltersPullRequestsAndFollowsLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) != 1 || page.Items[0].Ref.Number() != 3 || page.Items[0].State != contracts.IssueClosed {
-		t.Errorf("items = %+v, want only issue 3", page.Items)
+	if len(page.Items) != 2 || page.Items[0].Ref.Number() != 3 || page.Items[1].Ref.Number() != 4 {
+		t.Fatalf("items = %+v, want issues 3 and 4 in the forge order", page.Items)
+	}
+	if page.Items[0].State != contracts.IssueClosed || page.Items[0].IsPullRequest {
+		t.Errorf("issue 3 = %+v, want a closed issue that is not a pull request", page.Items[0])
+	}
+	if !page.Items[1].IsPullRequest {
+		t.Errorf("issue 4 = %+v, want it marked as a pull request", page.Items[1])
 	}
 	if page.Next != "2" {
 		t.Errorf("next = %q, want 2", page.Next)
@@ -123,8 +129,8 @@ func TestIssuesRefusesInvalidInputsWithoutSending(t *testing.T) {
 	if _, err := f.Issues(t.Context(), repo, contracts.IssueQuery{}, contracts.PageRequest{Limit: 101}); !errors.Is(err, contracts.ErrInvalidPageLimit) {
 		t.Errorf("limit 101: err = %v, want ErrInvalidPageLimit", err)
 	}
-	if _, err := f.Issues(t.Context(), repo, contracts.IssueQuery{State: contracts.IssueState(99)}, contracts.PageRequest{}); !errors.Is(err, errUnknownIssueState) {
-		t.Errorf("unknown state: err = %v, want errUnknownIssueState", err)
+	if _, err := f.Issues(t.Context(), repo, contracts.IssueQuery{State: contracts.IssueState(99)}, contracts.PageRequest{}); !errors.Is(err, contracts.ErrInvalidIssueQuery) {
+		t.Errorf("unknown state: err = %v, want ErrInvalidIssueQuery", err)
 	}
 	if calls.Load() != 0 {
 		t.Error("a refused listing reached the server")
@@ -152,11 +158,42 @@ func TestIssuesRefusesLabelWithComma(t *testing.T) {
 	var calls atomic.Int32
 	f, _ := newTestForge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 	query := contracts.IssueQuery{Labels: []string{"bug", "ui,mobile"}}
-	if _, err := f.Issues(t.Context(), testRepo(t), query, contracts.PageRequest{}); !errors.Is(err, ErrInvalidLabel) {
+	_, err := f.Issues(t.Context(), testRepo(t), query, contracts.PageRequest{})
+	if !errors.Is(err, ErrInvalidLabel) {
 		t.Fatalf("err = %v, want ErrInvalidLabel", err)
+	}
+	if !errors.Is(err, contracts.ErrUnsupportedIssueFilter) {
+		t.Errorf("err = %v, want ErrUnsupportedIssueFilter: the forge cannot filter by a comma label", err)
 	}
 	if calls.Load() != 0 {
 		t.Error("a listing with a comma label reached the server")
+	}
+}
+
+func TestIssuesRefusesEmptyLabelWithoutSending(t *testing.T) {
+	queries := []struct {
+		name   string
+		labels []string
+	}{
+		{name: "empty label", labels: []string{""}},
+		{name: "blank label", labels: []string{"   "}},
+		{name: "empty label after a valid one", labels: []string{"bug", ""}},
+	}
+	for _, query := range queries {
+		t.Run(query.name, func(t *testing.T) {
+			var calls atomic.Int32
+			f, _ := newTestForge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+			_, err := f.Issues(t.Context(), testRepo(t), contracts.IssueQuery{Labels: query.labels}, contracts.PageRequest{})
+			if !errors.Is(err, ErrInvalidLabel) {
+				t.Errorf("err = %v, want ErrInvalidLabel", err)
+			}
+			if !errors.Is(err, contracts.ErrUnsupportedIssueFilter) {
+				t.Errorf("err = %v, want ErrUnsupportedIssueFilter", err)
+			}
+			if calls.Load() != 0 {
+				t.Error("a listing with an empty label reached the server")
+			}
+		})
 	}
 }
 
