@@ -298,3 +298,28 @@ func TestChecksAgreesWithPullRequest(t *testing.T) {
 		t.Errorf("pull request checks = %v, the listing summarizes to %v", pull.Checks, want)
 	}
 }
+
+func TestChecksCarryTheAppAndTheRunIDAsAttempt(t *testing.T) {
+	fake := openFake(t)
+	run := checkRunFixture(77, "build", "completed", "success")
+	run["app"] = map[string]any{"id": 15368, "slug": "other-app"}
+	fake.checkRuns = []map[string]any{run}
+	status := statusFixture("ci/ok", "success")
+	status["id"] = 5
+	fake.statuses = []map[string]any{status}
+	f := newFakeForge(t, fake)
+	page, err := f.Checks(t.Context(), testRepo(t), mustCommit(t), contracts.PageRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("got %d checks, want 2", len(page.Items))
+	}
+	build, ci := page.Items[0], page.Items[1]
+	if build.AppID != 15368 || build.Attempt != 77 {
+		t.Errorf("check run: AppID %d, Attempt %d; want 15368 and 77", build.AppID, build.Attempt)
+	}
+	if ci.AppID != 0 || ci.Attempt != 5 {
+		t.Errorf("status: AppID %d, Attempt %d; want 0 and 5", ci.AppID, ci.Attempt)
+	}
+}
