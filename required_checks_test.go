@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
@@ -20,11 +21,17 @@ type reply struct {
 	payload any
 }
 
-var (
-	notProtected      = reply{http.StatusNotFound, map[string]string{"message": "Branch not protected"}}
-	protectedBranch   = reply{http.StatusOK, map[string]any{"protected": true}}
-	unprotectedBranch = reply{http.StatusOK, map[string]any{"protected": false}}
-)
+func notProtectedReply() reply {
+	return reply{http.StatusNotFound, map[string]string{"message": "Branch not protected"}}
+}
+
+func protectedBranchReply() reply {
+	return reply{http.StatusOK, map[string]any{"protected": true}}
+}
+
+func unprotectedBranchReply() reply {
+	return reply{http.StatusOK, map[string]any{"protected": false}}
+}
 
 func serveRequirements(tb testing.TB, rules, protection, branch reply) http.Handler {
 	tb.Helper()
@@ -79,7 +86,7 @@ func requirementNames(required []contracts.RequiredCheck) []string {
 func TestRequiredChecksReadsTheRulesetOnly(t *testing.T) {
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{ruleFixture(ruleCheckFixture("build", 15368))}},
-		notProtected, protectedBranch)
+		notProtectedReply(), protectedBranchReply())
 	required, err := requiredOf(t, handler)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +103,7 @@ func TestRequiredChecksReadsTheProtectionOnly(t *testing.T) {
 	}
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{}},
-		reply{http.StatusOK, protection}, protectedBranch)
+		reply{http.StatusOK, protection}, protectedBranchReply())
 	required, err := requiredOf(t, handler)
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +120,7 @@ func TestRequiredChecksDeduplicatesTheTwoSources(t *testing.T) {
 	}
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{ruleFixture(ruleCheckFixture("build", 15368))}},
-		reply{http.StatusOK, protection}, protectedBranch)
+		reply{http.StatusOK, protection}, protectedBranchReply())
 	required, err := requiredOf(t, handler)
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +133,7 @@ func TestRequiredChecksDeduplicatesTheTwoSources(t *testing.T) {
 func TestRequiredChecksIsEmptyWhenTheBranchIsNotProtected(t *testing.T) {
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{}},
-		notProtected, unprotectedBranch)
+		reply{http.StatusNotFound, map[string]string{"message": "Not Found"}}, unprotectedBranchReply())
 	required, err := requiredOf(t, handler)
 	if err != nil {
 		t.Fatal(err)
@@ -136,10 +143,33 @@ func TestRequiredChecksIsEmptyWhenTheBranchIsNotProtected(t *testing.T) {
 	}
 }
 
+func TestRequiredChecksReadsNoBranchWhenTheProtectionSaysNotProtected(t *testing.T) {
+	var branchReads atomic.Int32
+	served := serveRequirements(t,
+		reply{http.StatusOK, []any{ruleFixture(ruleCheckFixture("test", 0))}},
+		notProtectedReply(), protectedBranchReply())
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == branchPath {
+			branchReads.Add(1)
+		}
+		served.ServeHTTP(w, r)
+	})
+	required, err := requiredOf(t, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requirementNames(required); len(got) != 1 || got[0] != "test" {
+		t.Fatalf("RequiredChecks = %v, want the ruleset requirement only", got)
+	}
+	if reads := branchReads.Load(); reads != 0 {
+		t.Fatalf("branch read %d times, want no read when the protection says not protected", reads)
+	}
+}
+
 func TestRequiredChecksTakesTheRulesetsWhenTheBranchIsGovernedByThemOnly(t *testing.T) {
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{ruleFixture(ruleCheckFixture("test", 0))}},
-		notProtected, protectedBranch)
+		notProtectedReply(), protectedBranchReply())
 	required, err := requiredOf(t, handler)
 	if err != nil {
 		t.Fatal(err)
@@ -152,9 +182,9 @@ func TestRequiredChecksTakesTheRulesetsWhenTheBranchIsGovernedByThemOnly(t *test
 func TestRequiredChecksRefusesANotFoundProtectionOnAProtectedBranch(t *testing.T) {
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{}},
-		reply{http.StatusNotFound, map[string]string{"message": "Not Found"}}, protectedBranch)
+		reply{http.StatusNotFound, map[string]string{"message": "Not Found"}}, protectedBranchReply())
 	_, err := requiredOf(t, handler)
-	if !errors.Is(err, contracts.ErrRequiredChecksUnknown) || !errors.Is(err, errProtectionUnread) {
+	if !errors.Is(err, contracts.ErrRequiredChecksUnknown) || !errors.Is(err, contracts.ErrForgeNotFound) || !errors.Is(err, errProtectionUnread) {
 		t.Fatalf("RequiredChecks error = %v, want unknown requirements, since the protection cannot be read", err)
 	}
 }
@@ -173,7 +203,7 @@ func TestRequiredChecksRefusesAnUnknownBranch(t *testing.T) {
 func TestRequiredChecksWrapsARefusedRulesetRead(t *testing.T) {
 	handler := serveRequirements(t,
 		reply{http.StatusForbidden, map[string]string{"message": "Forbidden"}},
-		reply{http.StatusOK, map[string]any{"checks": []any{}}}, protectedBranch)
+		reply{http.StatusOK, map[string]any{"checks": []any{}}}, protectedBranchReply())
 	_, err := requiredOf(t, handler)
 	if !errors.Is(err, contracts.ErrRequiredChecksUnknown) || !errors.Is(err, contracts.ErrForgeForbidden) {
 		t.Fatalf("RequiredChecks error = %v, want unknown requirements caused by a refusal", err)
@@ -183,7 +213,7 @@ func TestRequiredChecksWrapsARefusedRulesetRead(t *testing.T) {
 func TestRequiredChecksWrapsARefusedProtectionRead(t *testing.T) {
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{}},
-		reply{http.StatusForbidden, map[string]string{"message": "Forbidden"}}, protectedBranch)
+		reply{http.StatusForbidden, map[string]string{"message": "Forbidden"}}, protectedBranchReply())
 	_, err := requiredOf(t, handler)
 	if !errors.Is(err, contracts.ErrRequiredChecksUnknown) || !errors.Is(err, contracts.ErrForgeForbidden) {
 		t.Fatalf("RequiredChecks error = %v, want unknown requirements caused by a refusal", err)
@@ -193,7 +223,7 @@ func TestRequiredChecksWrapsARefusedProtectionRead(t *testing.T) {
 func TestRequiredChecksRefusesARequirementWithoutAName(t *testing.T) {
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{ruleFixture(ruleCheckFixture("", 0))}},
-		notProtected, protectedBranch)
+		notProtectedReply(), protectedBranchReply())
 	_, err := requiredOf(t, handler)
 	if !errors.Is(err, contracts.ErrEmptyRequiredCheckName) || !errors.Is(err, contracts.ErrRequiredChecksUnknown) {
 		t.Fatalf("RequiredChecks error = %v, want an unnamed requirement refused as unknown", err)
@@ -206,7 +236,7 @@ func TestRequiredChecksReadsAppMinusOneAsAnySource(t *testing.T) {
 	}
 	handler := serveRequirements(t,
 		reply{http.StatusOK, []any{ruleFixture(ruleCheckFixture("build", -1))}},
-		reply{http.StatusOK, protection}, protectedBranch)
+		reply{http.StatusOK, protection}, protectedBranchReply())
 	required, err := requiredOf(t, handler)
 	if err != nil {
 		t.Fatal(err)

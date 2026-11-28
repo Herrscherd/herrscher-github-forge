@@ -88,8 +88,11 @@ func (f *forge) protectionRequirements(ctx context.Context, repo contracts.Forge
 	err := f.exchangeChecked(ctx, spec, check, func(_ contracts.ForgeToken, resp *http.Response) error {
 		return decodeJSON(resp.Body, &wire)
 	})
+	if errors.Is(err, errBranchNotProtected) {
+		return nil, nil
+	}
 	if errors.Is(err, contracts.ErrForgeNotFound) {
-		return f.unprotectedRequirements(ctx, repo, branch, errors.Is(err, errBranchNotProtected))
+		return f.unprotectedRequirements(ctx, repo, branch)
 	}
 	if err != nil {
 		return nil, err
@@ -113,15 +116,15 @@ func notProtectedAnswer(body io.Reader) bool {
 	return decodeJSON(body, &answer) == nil && answer.Message == branchNotProtectedMessage
 }
 
-func (f *forge) unprotectedRequirements(ctx context.Context, repo contracts.ForgeRepoRef, branch contracts.BranchName, notProtected bool) ([]contracts.RequiredCheck, error) {
+func (f *forge) unprotectedRequirements(ctx context.Context, repo contracts.ForgeRepoRef, branch contracts.BranchName) ([]contracts.RequiredCheck, error) {
 	var wire branchProtectionWire
 	if err := f.getJSON(ctx, f.repoURL(repo, nil, branchElements(branch, "branches")...), &wire); err != nil {
 		return nil, err
 	}
-	if !wire.Protected || notProtected {
+	if !wire.Protected {
 		return nil, nil
 	}
-	return nil, errProtectionUnread
+	return nil, fmt.Errorf("%w: %w", contracts.ErrForgeNotFound, errProtectionUnread)
 }
 
 func branchElements(branch contracts.BranchName, prefix ...string) []string {
