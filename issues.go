@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -14,6 +15,12 @@ import (
 const (
 	issueStateOpen   = "open"
 	issueStateClosed = "closed"
+
+	issueSortCreated   = "created"
+	issueSortUpdated   = "updated"
+	sortAscending      = "asc"
+	sortDescending     = "desc"
+	issueSinceWidening = time.Second
 )
 
 type labelWire struct {
@@ -29,6 +36,8 @@ type issueWire struct {
 	AuthorAssociation string      `json:"author_association"`
 	User              actorWire   `json:"user"`
 	Labels            []labelWire `json:"labels"`
+	CreatedAt         time.Time   `json:"created_at"`
+	UpdatedAt         time.Time   `json:"updated_at"`
 	PullRequest       *struct{}   `json:"pull_request"`
 }
 
@@ -46,13 +55,16 @@ func (i issueWire) toIssue(repo contracts.ForgeRepoRef) (contracts.Issue, error)
 		labels = append(labels, label.Name)
 	}
 	return contracts.Issue{
-		Ref:    ref,
-		Title:  i.Title,
-		Body:   i.Body,
-		URL:    i.HTMLURL,
-		Author: i.User.forgeActor(i.AuthorAssociation),
-		Labels: labels,
-		State:  state,
+		Ref:           ref,
+		Title:         i.Title,
+		Body:          i.Body,
+		URL:           i.HTMLURL,
+		Author:        i.User.forgeActor(i.AuthorAssociation),
+		Labels:        labels,
+		State:         state,
+		CreatedAt:     i.CreatedAt,
+		UpdatedAt:     i.UpdatedAt,
+		IsPullRequest: i.PullRequest != nil,
 	}, nil
 }
 
@@ -77,6 +89,28 @@ func issueStateName(state contracts.IssueState) (string, error) {
 	return "", fmt.Errorf("%s: %w", state, errUnknownIssueState)
 }
 
+func issueSortName(sort contracts.IssueSort) string {
+	switch sort {
+	case contracts.IssueSortCreated:
+		return issueSortCreated
+	case contracts.IssueSortUpdated:
+		return issueSortUpdated
+	case contracts.IssueSortDefault:
+	}
+	return ""
+}
+
+func sortDirectionName(direction contracts.SortDirection) string {
+	switch direction {
+	case contracts.SortAscending:
+		return sortAscending
+	case contracts.SortDescending:
+		return sortDescending
+	case contracts.SortDirectionDefault:
+	}
+	return ""
+}
+
 func (f *forge) Issue(ctx context.Context, ref contracts.IssueRef) (contracts.Issue, error) {
 	if err := f.checkRepo(ref.Repo()); err != nil {
 		return contracts.Issue{}, err
@@ -94,73 +128,133 @@ func (f *forge) Issue(ctx context.Context, ref contracts.IssueRef) (contracts.Is
 func checkLabels(labels []string) error {
 	for _, label := range labels {
 		if strings.Contains(label, ",") {
-			return fmt.Errorf("label %q: %w", label, ErrInvalidLabel)
+			return fmt.Errorf("label %q: %w: %w", label, ErrInvalidLabel, contracts.ErrUnsupportedIssueFilter)
 		}
 	}
 	return nil
 }
 
-func issuesOf(wires []issueWire, repo contracts.ForgeRepoRef) ([]contracts.Issue, error) {
+func issuesOf(wires []issueWire, repo contracts.ForgeRepoRef, updatedSince time.Time) ([]contracts.Issue, error) {
 	items := make([]contracts.Issue, 0, len(wires))
 	for index := range wires {
-		wire := &wires[index]
-		if wire.PullRequest != nil {
-			continue
-		}
-		issue, err := wire.toIssue(repo)
+		issue, err := wires[index].toIssue(repo)
 		if err != nil {
 			return nil, err
+		}
+		if !updatedSince.IsZero() && issue.UpdatedAt.Before(updatedSince) {
+			continue
 		}
 		items = append(items, issue)
 	}
 	return items, nil
 }
 
-func (f *forge) Issues(ctx context.Context, repo contracts.ForgeRepoRef, query contracts.IssueQuery, page contracts.PageRequest) (contracts.Page[contracts.Issue], error) {
-	if err := f.checkRepo(repo); err != nil {
-		return contracts.Page[contracts.Issue]{}, err
-	}
-	limit, err := pageLimit(page)
-	if err != nil {
-		return contracts.Page[contracts.Issue]{}, err
-	}
-	number, err := pageNumber(page.Cursor)
-	if err != nil {
-		return contracts.Page[contracts.Issue]{}, err
-	}
+func (f *forge) issuesURL(repo contracts.ForgeRepoRef, query contracts.IssueQuery, limit, number int) (*url.URL, error) {
 	state, err := issueStateName(query.Listed())
 	if err != nil {
-		return contracts.Page[contracts.Issue]{}, err
+		return nil, err
 	}
 	if err := checkLabels(query.Labels); err != nil {
-		return contracts.Page[contracts.Issue]{}, err
+		return nil, err
 	}
 	values := url.Values{}
 	values.Set("state", state)
-	values.Set("labels", strings.Join(query.Labels, ","))
+	if len(query.Labels) > 0 {
+		values.Set("labels", strings.Join(query.Labels, ","))
+	}
+	if !query.Mentioned.IsZero() {
+		values.Set("mentioned", query.Mentioned.String())
+	}
+	if !query.UpdatedSince.IsZero() {
+		values.Set("since", query.UpdatedSince.Add(-issueSinceWidening).UTC().Format(time.RFC3339))
+	}
+	if sort := issueSortName(query.Sort); sort != "" {
+		values.Set("sort", sort)
+	}
+	if direction := sortDirectionName(query.Direction); direction != "" {
+		values.Set("direction", direction)
+	}
 	values.Set("per_page", strconv.Itoa(limit))
 	values.Set("page", strconv.Itoa(number))
-	spec := request{method: http.MethodGet, target: f.repoURL(repo, values, "issues")}
-	var items []contracts.Issue
-	var next contracts.PageCursor
+	return f.repoURL(repo, values, "issues"), nil
+}
+
+func (f *forge) Issues(ctx context.Context, repo contracts.ForgeRepoRef, query contracts.IssueQuery, page contracts.PageRequest) (contracts.Page[contracts.Issue], error) {
+	listing, err := f.IssuesSince(ctx, repo, query, page, "")
+	if err != nil {
+		return contracts.Page[contracts.Issue]{}, err
+	}
+	return listing.Page, nil
+}
+
+func (f *forge) IssuesSince(ctx context.Context, repo contracts.ForgeRepoRef, query contracts.IssueQuery, page contracts.PageRequest, since contracts.Revision) (contracts.IssueListing, error) {
+	if err := f.checkRepo(repo); err != nil {
+		return contracts.IssueListing{}, err
+	}
+	if err := query.Validate(); err != nil {
+		return contracts.IssueListing{}, err
+	}
+	spec, err := f.issuesRequest(repo, query, page, since)
+	if err != nil {
+		return contracts.IssueListing{}, err
+	}
+	var listing contracts.IssueListing
+	unchanged := false
 	exchangeErr := f.exchange(ctx, spec, func(_ contracts.ForgeToken, resp *http.Response) error {
-		var wires []issueWire
-		if err := decodeJSON(resp.Body, &wires); err != nil {
-			return err
+		if resp.StatusCode == http.StatusNotModified {
+			unchanged = true
+			return nil
 		}
-		converted, err := issuesOf(wires, repo)
-		if err != nil {
-			return err
-		}
-		items = converted
-		var cursorErr error
-		next, cursorErr = nextPageCursor(resp.Header.Get(headerLink))
-		return cursorErr
+		decoded, err := decodeIssueListing(resp, repo, query, page)
+		listing = decoded
+		return err
 	})
 	if exchangeErr != nil {
-		return contracts.Page[contracts.Issue]{}, exchangeErr
+		return contracts.IssueListing{}, exchangeErr
 	}
-	return contracts.Page[contracts.Issue]{Items: items, Next: next}, nil
+	if unchanged {
+		return contracts.IssueListing{}, fmt.Errorf("issues of %s: %w", repo, contracts.ErrForgeNotModified)
+	}
+	return listing, nil
+}
+
+func (f *forge) issuesRequest(repo contracts.ForgeRepoRef, query contracts.IssueQuery, page contracts.PageRequest, since contracts.Revision) (request, error) {
+	limit, err := pageLimit(page)
+	if err != nil {
+		return request{}, err
+	}
+	number, err := pageNumber(page.Cursor)
+	if err != nil {
+		return request{}, err
+	}
+	target, err := f.issuesURL(repo, query, limit, number)
+	if err != nil {
+		return request{}, err
+	}
+	spec := request{method: http.MethodGet, target: target}
+	if etag, bound := contracts.IssueListingETag(since, repo, query, page); bound {
+		spec.ifNoneMatch = etag
+	}
+	return spec, nil
+}
+
+func decodeIssueListing(resp *http.Response, repo contracts.ForgeRepoRef, query contracts.IssueQuery, page contracts.PageRequest) (contracts.IssueListing, error) {
+	var wires []issueWire
+	if err := decodeJSON(resp.Body, &wires); err != nil {
+		return contracts.IssueListing{}, err
+	}
+	items, err := issuesOf(wires, repo, query.UpdatedSince)
+	if err != nil {
+		return contracts.IssueListing{}, err
+	}
+	next, err := nextPageCursor(resp.Header.Get(headerLink))
+	if err != nil {
+		return contracts.IssueListing{}, err
+	}
+	return contracts.IssueListing{
+		Page:     contracts.Page[contracts.Issue]{Items: items, Next: next},
+		Revision: contracts.IssueListingRevision(repo, query, page, resp.Header.Get(headerETag)),
+	}, nil
 }
 
 type issueCreateWire struct {

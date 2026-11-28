@@ -69,6 +69,7 @@ func (f *forge) repoURL(repo contracts.ForgeRepoRef, query url.Values, elements 
 
 var (
 	_ contracts.Forge                = (*forge)(nil)
+	_ contracts.ConditionalIssues    = (*forge)(nil)
 	_ contracts.IssueWriter          = (*forge)(nil)
 	_ contracts.RequiredChecksSource = (*forge)(nil)
 )
