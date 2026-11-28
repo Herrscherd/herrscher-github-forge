@@ -170,6 +170,33 @@ func TestIssuesRefusesLabelWithComma(t *testing.T) {
 	}
 }
 
+func TestIssuesRefusesEmptyLabelWithoutSending(t *testing.T) {
+	queries := []struct {
+		name   string
+		labels []string
+	}{
+		{name: "empty label", labels: []string{""}},
+		{name: "blank label", labels: []string{"   "}},
+		{name: "empty label after a valid one", labels: []string{"bug", ""}},
+	}
+	for _, query := range queries {
+		t.Run(query.name, func(t *testing.T) {
+			var calls atomic.Int32
+			f, _ := newTestForge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+			_, err := f.Issues(t.Context(), testRepo(t), contracts.IssueQuery{Labels: query.labels}, contracts.PageRequest{})
+			if !errors.Is(err, ErrInvalidLabel) {
+				t.Errorf("err = %v, want ErrInvalidLabel", err)
+			}
+			if !errors.Is(err, contracts.ErrUnsupportedIssueFilter) {
+				t.Errorf("err = %v, want ErrUnsupportedIssueFilter", err)
+			}
+			if calls.Load() != 0 {
+				t.Error("a listing with an empty label reached the server")
+			}
+		})
+	}
+}
+
 func TestNextPageCursorReadsLinkRelation(t *testing.T) {
 	tests := []struct {
 		name string

@@ -59,6 +59,26 @@ func TestIssuesUpdatedSinceIncludesTheBoundAndWidensTheRequest(t *testing.T) {
 	}
 }
 
+func TestIssuesUpdatedSinceKeepsAnIssueUpdatedWithinTheBoundSecond(t *testing.T) {
+	bound := time.Date(2026, time.November, 20, 10, 0, 0, 500_000_000, time.UTC)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/acme/widgets/issues", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, []any{
+			timedIssuePayload(1, time.Date(2026, time.November, 20, 9, 59, 59, 0, time.UTC)),
+			timedIssuePayload(2, time.Date(2026, time.November, 20, 10, 0, 0, 0, time.UTC)),
+			timedIssuePayload(3, time.Date(2026, time.November, 20, 10, 0, 1, 0, time.UTC)),
+		})
+	})
+	f, _ := newTestForge(t, mux)
+	page, err := f.Issues(t.Context(), testRepo(t), contracts.IssueQuery{UpdatedSince: bound}, contracts.PageRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := issueNumbers(page.Items); !slices.Equal(got, []int{2, 3}) {
+		t.Errorf("issues = %v, want [2 3]: GitHub reports whole seconds, so an issue updated at 10:00:00 is within the bound 10:00:00.5", got)
+	}
+}
+
 func TestIssuesWithoutUpdatedSinceSendsNoSince(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/acme/widgets/issues", func(w http.ResponseWriter, r *http.Request) {

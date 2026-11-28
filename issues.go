@@ -130,18 +130,22 @@ func checkLabels(labels []string) error {
 		if strings.Contains(label, ",") {
 			return fmt.Errorf("label %q: %w: %w", label, ErrInvalidLabel, contracts.ErrUnsupportedIssueFilter)
 		}
+		if strings.TrimSpace(label) == "" {
+			return fmt.Errorf("label %q is empty: %w: %w", label, ErrInvalidLabel, contracts.ErrUnsupportedIssueFilter)
+		}
 	}
 	return nil
 }
 
 func issuesOf(wires []issueWire, repo contracts.ForgeRepoRef, updatedSince time.Time) ([]contracts.Issue, error) {
 	items := make([]contracts.Issue, 0, len(wires))
+	secondBound := updatedSince.Truncate(time.Second)
 	for index := range wires {
 		issue, err := wires[index].toIssue(repo)
 		if err != nil {
 			return nil, err
 		}
-		if !updatedSince.IsZero() && issue.UpdatedAt.Before(updatedSince) {
+		if !updatedSince.IsZero() && issue.UpdatedAt.Before(secondBound) {
 			continue
 		}
 		items = append(items, issue)
