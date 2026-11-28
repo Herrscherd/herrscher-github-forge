@@ -22,6 +22,8 @@ type checkRunFacts struct {
 	conclusion  string
 	url         string
 	jobID       int64
+	appID       int64
+	attempt     int64
 	fromActions bool
 }
 
@@ -30,7 +32,7 @@ func checkRunCheck(repo contracts.ForgeRepoRef, commit contracts.CommitSHA, fact
 	if err != nil {
 		return contracts.Check{}, fmt.Errorf("check run %q: %w", facts.name, err)
 	}
-	check := contracts.Check{Name: facts.name, Commit: commit, Status: status, URL: facts.url}
+	check := contracts.Check{Name: facts.name, Commit: commit, Status: status, URL: facts.url, AppID: facts.appID, Attempt: facts.attempt}
 	if check.Status == contracts.CheckCompleted {
 		check.Conclusion = checkRunConclusion(facts.conclusion)
 	}
@@ -44,8 +46,8 @@ func checkRunCheck(repo contracts.ForgeRepoRef, commit contracts.CommitSHA, fact
 	return check, nil
 }
 
-func statusCheck(commit contracts.CommitSHA, name, state, targetURL string) (contracts.Check, error) {
-	check := contracts.Check{Name: name, Commit: commit, URL: targetURL}
+func statusCheck(commit contracts.CommitSHA, name, state, targetURL string, attempt int64) (contracts.Check, error) {
+	check := contracts.Check{Name: name, Commit: commit, URL: targetURL, Attempt: attempt}
 	switch state {
 	case "SUCCESS":
 		check.Status, check.Conclusion = contracts.CheckCompleted, contracts.ConclusionSuccess
@@ -163,6 +165,7 @@ type checkRunWire struct {
 }
 
 type appWire struct {
+	ID   int64  `json:"id"`
 	Slug string `json:"slug"`
 }
 
@@ -171,20 +174,26 @@ type combinedStatusWire struct {
 }
 
 type statusWire struct {
+	ID        int64  `json:"id"`
 	Context   string `json:"context"`
 	State     string `json:"state"`
 	TargetURL string `json:"target_url"`
 }
 
 func (r checkRunWire) toCheck(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) (contracts.Check, error) {
-	return checkRunCheck(repo, commit, checkRunFacts{
+	facts := checkRunFacts{
 		name:        r.Name,
 		status:      strings.ToUpper(r.Status),
 		conclusion:  strings.ToUpper(r.Conclusion),
 		url:         r.DetailsURL,
 		jobID:       r.ID,
+		attempt:     r.ID,
 		fromActions: r.App != nil && r.App.Slug == actionsAppSlug,
-	})
+	}
+	if r.App != nil {
+		facts.appID = r.App.ID
+	}
+	return checkRunCheck(repo, commit, facts)
 }
 
 func checkRunChecks(repo contracts.ForgeRepoRef, commit contracts.CommitSHA) func(io.Reader) ([]contracts.Check, error) {
@@ -213,7 +222,7 @@ func statusChecks(commit contracts.CommitSHA) func(io.Reader) ([]contracts.Check
 		}
 		checks := make([]contracts.Check, 0, len(wire.Statuses))
 		for _, status := range wire.Statuses {
-			check, err := statusCheck(commit, status.Context, strings.ToUpper(status.State), status.TargetURL)
+			check, err := statusCheck(commit, status.Context, strings.ToUpper(status.State), status.TargetURL, status.ID)
 			if err != nil {
 				return nil, err
 			}

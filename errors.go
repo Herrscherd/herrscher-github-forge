@@ -30,6 +30,7 @@ var (
 	errJobLogTooLarge      = errors.New("job log exceeds the read limit")
 	errTooManyRedirects    = errors.New("forge redirected too many times")
 	errMissingCommit       = errors.New("commit is the zero value and names no commit")
+	errMissingBranch       = errors.New("branch is the zero value and names no branch")
 	errTooManyCommentPages = errors.New("review thread has more comment pages than the plugin reads")
 	errRefusedRepo         = errors.New("repository is refused by the contracts port and left out of the listing")
 	errTooManyPages        = errors.New("listing has more pages than the plugin reads")
